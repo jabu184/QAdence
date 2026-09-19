@@ -1,0 +1,230 @@
+import React, { useState, useEffect } from 'react';
+import { X, CheckCircle, AlertCircle, RefreshCw, Key, Globe, Shield } from 'lucide-react';
+
+export default function SettingsModal({ isOpen, onClose, onConfigSaved }) {
+  const [baseUrl, setBaseUrl] = useState('');
+  const [token, setToken] = useState('');
+  const [authType, setAuthType] = useState('Api-Key');
+  const [isTesting, setIsTesting] = useState(false);
+  const [testResult, setTestResult] = useState(null);
+  const [isSaving, setIsSaving] = useState(false);
+
+  useEffect(() => {
+    if (isOpen) {
+      fetch('/api/config')
+        .then(r => r.json())
+        .then(data => {
+          setBaseUrl(data.baseUrl || '');
+          setToken(data.token || '');
+          setAuthType(data.authType || 'Token');
+          setTestResult(null);
+        })
+        .catch(console.error);
+    }
+  }, [isOpen]);
+
+  if (!isOpen) return null;
+
+  const handleTestConnection = async () => {
+    setIsTesting(true);
+    setTestResult(null);
+    try {
+      // First save current values temporarily so test can run against them
+      await fetch('/api/config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ baseUrl, token, authType })
+      });
+
+      const res = await fetch('/api/test-connection', { method: 'POST' });
+      const data = await res.json();
+      setTestResult(data);
+    } catch (e) {
+      setTestResult({ success: false, message: e.message });
+    } finally {
+      setIsTesting(false);
+    }
+  };
+
+  const handleSave = async () => {
+    setIsSaving(true);
+    try {
+      await fetch('/api/config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ baseUrl, token, authType })
+      });
+      if (onConfigSaved) onConfigSaved();
+      onClose();
+    } catch (e) {
+      alert('Failed to save settings: ' + e.message);
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  return (
+    <div className="modal-overlay">
+      <div className="card" style={{ width: '100%', maxWidth: '520px', padding: '1.5rem', position: 'relative' }}>
+        <button
+          onClick={onClose}
+          style={{ position: 'absolute', top: '16px', right: '16px', color: '#64748b' }}
+        >
+          <X size={20} />
+        </button>
+
+        <h2 style={{ fontSize: '1.2rem', fontWeight: '700', color: '#0f172a', marginBottom: '0.25rem' }}>
+          QATrack+ Connection Settings
+        </h2>
+        <p style={{ fontSize: '0.82rem', color: '#64748b', marginBottom: '1.25rem' }}>
+          Configure live REST API connection to your QATrack+ v3.1 instance.
+        </p>
+
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+          {/* Base URL */}
+          <div>
+            <label style={{ fontSize: '0.8rem', fontWeight: '600', color: '#334155', display: 'flex', alignItems: 'center', gap: '6px', marginBottom: '0.35rem' }}>
+              <Globe size={15} color="#2563eb" /> QATrack+ Server Base URL
+            </label>
+            <input
+              type="text"
+              placeholder="e.g. http://qatrack.local:8000 or https://qatrack.hospital.org"
+              value={baseUrl}
+              onChange={(e) => setBaseUrl(e.target.value)}
+              style={{
+                width: '100%',
+                padding: '0.55rem 0.75rem',
+                borderRadius: '8px',
+                border: '1px solid #cbd5e1',
+                fontSize: '0.85rem'
+              }}
+            />
+          </div>
+
+          {/* Auth Header Type */}
+          <div>
+            <label style={{ fontSize: '0.8rem', fontWeight: '600', color: '#334155', display: 'flex', alignItems: 'center', gap: '6px', marginBottom: '0.35rem' }}>
+              <Shield size={15} color="#2563eb" /> Authorization Header Prefix
+            </label>
+            <select
+              value={authType}
+              onChange={(e) => setAuthType(e.target.value)}
+              style={{
+                width: '100%',
+                padding: '0.55rem 0.75rem',
+                borderRadius: '8px',
+                border: '1px solid #cbd5e1',
+                fontSize: '0.85rem'
+              }}
+            >
+              <option value="Api-Key">Api-Key (Default in QATrack+ REST API)</option>
+              <option value="Token">Token (Django REST Framework TokenAuth)</option>
+              <option value="Bearer">Bearer (OAuth2 / JWT)</option>
+            </select>
+          </div>
+
+          {/* API Token */}
+          <div>
+            <label style={{ fontSize: '0.8rem', fontWeight: '600', color: '#334155', display: 'flex', alignItems: 'center', gap: '6px', marginBottom: '0.35rem' }}>
+              <Key size={15} color="#2563eb" /> API Token
+            </label>
+            <input
+              type="password"
+              placeholder="Paste your QATrack+ API token here..."
+              value={token}
+              onChange={(e) => setToken(e.target.value)}
+              style={{
+                width: '100%',
+                padding: '0.55rem 0.75rem',
+                borderRadius: '8px',
+                border: '1px solid #cbd5e1',
+                fontSize: '0.85rem',
+                fontFamily: 'monospace'
+              }}
+            />
+            <div style={{ fontSize: '0.75rem', color: '#64748b', marginTop: '0.25rem' }}>
+              In QATrack+, tokens can be generated under Account Profile / API Access.
+            </div>
+          </div>
+
+          {/* Test Connection Button & Result */}
+          <div style={{ marginTop: '0.5rem' }}>
+            <button
+              onClick={handleTestConnection}
+              disabled={isTesting}
+              style={{
+                padding: '0.5rem 1rem',
+                borderRadius: '8px',
+                border: '1px solid #cbd5e1',
+                background: '#f8fafc',
+                color: '#1e293b',
+                fontSize: '0.85rem',
+                fontWeight: '600',
+                display: 'flex',
+                alignItems: 'center',
+                gap: '6px'
+              }}
+            >
+              {isTesting ? <RefreshCw size={14} className="spin" /> : null}
+              {isTesting ? 'Testing connection...' : 'Test Connection'}
+            </button>
+
+            {testResult && (
+              <div style={{
+                marginTop: '0.75rem',
+                padding: '0.75rem',
+                borderRadius: '8px',
+                fontSize: '0.82rem',
+                display: 'flex',
+                alignItems: 'flex-start',
+                gap: '8px',
+                background: testResult.success ? '#ecfdf5' : '#fef2f2',
+                border: `1px solid ${testResult.success ? '#a7f3d0' : '#fecaca'}`,
+                color: testResult.success ? '#065f46' : '#991b1b'
+              }}>
+                {testResult.success ? <CheckCircle size={18} /> : <AlertCircle size={18} />}
+                <div>
+                  <div style={{ fontWeight: '600' }}>
+                    {testResult.success ? 'Connection Successful!' : 'Connection Failed'}
+                  </div>
+                  <div>{testResult.message}</div>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* Modal Footer */}
+        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '0.5rem', marginTop: '1.5rem', paddingTop: '1rem', borderTop: '1px solid #e2e8f0' }}>
+          <button
+            onClick={onClose}
+            style={{
+              padding: '0.5rem 1rem',
+              borderRadius: '8px',
+              border: '1px solid #cbd5e1',
+              background: '#ffffff',
+              color: '#475569',
+              fontSize: '0.85rem'
+            }}
+          >
+            Cancel
+          </button>
+          <button
+            onClick={handleSave}
+            disabled={isSaving}
+            style={{
+              padding: '0.5rem 1.25rem',
+              borderRadius: '8px',
+              background: '#2563eb',
+              color: '#ffffff',
+              fontSize: '0.85rem',
+              fontWeight: '600'
+            }}
+          >
+            {isSaving ? 'Saving...' : 'Save Settings'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}

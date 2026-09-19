@@ -1,0 +1,131 @@
+const Database = require('better-sqlite3');
+const path = require('path');
+const fs = require('fs');
+
+const dataDir = path.join(__dirname, '..', 'data');
+if (!fs.existsSync(dataDir)) {
+  fs.mkdirSync(dataDir, { recursive: true });
+}
+
+const dbPath = path.join(dataDir, 'patient_qa.db');
+const db = new Database(dbPath);
+
+// Enable WAL mode for high performance concurrent reads
+db.pragma('journal_mode = WAL');
+db.pragma('foreign_keys = ON');
+
+// Initialize database schema
+db.exec(`
+  CREATE TABLE IF NOT EXISTS units (
+    id INTEGER PRIMARY KEY,
+    name TEXT NOT NULL UNIQUE,
+    unit_class TEXT,
+    unit_type TEXT,
+    serial_number TEXT,
+    location TEXT,
+    active INTEGER DEFAULT 1
+  );
+
+  CREATE TABLE IF NOT EXISTS test_lists (
+    id INTEGER PRIMARY KEY,
+    name TEXT NOT NULL UNIQUE,
+    slug TEXT,
+    description TEXT
+  );
+
+  CREATE TABLE IF NOT EXISTS test_definitions (
+    id INTEGER PRIMARY KEY,
+    name TEXT NOT NULL,
+    slug TEXT,
+    test_list_name TEXT,
+    unit TEXT,
+    data_type TEXT,
+    is_numeric INTEGER DEFAULT 1,
+    UNIQUE(name, test_list_name)
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_test_def_name ON test_definitions(name);
+  CREATE INDEX IF NOT EXISTS idx_test_def_list ON test_definitions(test_list_name);
+
+  CREATE TABLE IF NOT EXISTS unit_test_collections (
+    id INTEGER PRIMARY KEY,
+    unit_id INTEGER,
+    unit_name TEXT,
+    test_list_id INTEGER,
+    test_list_name TEXT,
+    collection_name TEXT,
+    active INTEGER DEFAULT 1
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_utc_unit ON unit_test_collections(unit_name);
+  CREATE INDEX IF NOT EXISTS idx_utc_test_list ON unit_test_collections(test_list_name);
+
+  CREATE TABLE IF NOT EXISTS sessions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    qatrack_instance_id INTEGER UNIQUE,
+    unit_id INTEGER,
+    unit_name TEXT NOT NULL,
+    test_list_name TEXT NOT NULL,
+    work_completed DATETIME NOT NULL,
+    created_by TEXT,
+    status TEXT,
+    comments TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(unit_id) REFERENCES units(id) ON DELETE SET NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS test_values (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id INTEGER NOT NULL,
+    test_name TEXT NOT NULL,
+    test_slug TEXT,
+    value_string TEXT,
+    value_numeric REAL,
+    unit TEXT,
+    tolerance_min REAL,
+    tolerance_max REAL,
+    status TEXT,
+    FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_test_values_session ON test_values(session_id);
+  CREATE INDEX IF NOT EXISTS idx_test_values_name ON test_values(test_name);
+  CREATE INDEX IF NOT EXISTS idx_test_values_numeric ON test_values(value_numeric);
+  CREATE INDEX IF NOT EXISTS idx_sessions_unit ON sessions(unit_name);
+  CREATE INDEX IF NOT EXISTS idx_sessions_date ON sessions(work_completed);
+
+  CREATE TABLE IF NOT EXISTS presets (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    description TEXT,
+    config_json TEXT NOT NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  );
+
+  CREATE TABLE IF NOT EXISTS settings (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+  );
+`);
+
+// Safe migrations for existing databases
+try {
+  const cols = db.prepare("PRAGMA table_info(units)").all().map(c => c.name);
+  if (!cols.includes('unit_class')) {
+    db.exec("ALTER TABLE units ADD COLUMN unit_class TEXT");
+  }
+  if (!cols.includes('unit_type')) {
+    db.exec("ALTER TABLE units ADD COLUMN unit_type TEXT");
+  }
+
+  const utcCols = db.prepare("PRAGMA table_info(unit_test_collections)").all().map(c => c.name);
+  if (!utcCols.includes('active')) {
+    db.exec("ALTER TABLE unit_test_collections ADD COLUMN active INTEGER DEFAULT 1");
+  }
+  db.exec("CREATE INDEX IF NOT EXISTS idx_utc_active ON unit_test_collections(active)");
+} catch (e) {
+  console.warn('Migration warning:', e.message);
+}
+
+module.exports = db;
