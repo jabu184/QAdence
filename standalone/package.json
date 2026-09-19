@@ -1,7 +1,7 @@
 {
-  "name": "qadence-standalone",
+  "name": "qadence",
   "version": "1.0.0",
-  "description": "",
+  "description": "QAdence - Trends & Analysis Platform for QATrack+ QA Data",
   "main": "index.js",
   "scripts": {
     "start": "node server/index.js",

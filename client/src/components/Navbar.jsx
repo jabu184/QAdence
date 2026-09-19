@@ -20,7 +20,7 @@ export default function Navbar({
     <header style={{
       background: '#ffffff',
       borderBottom: '1px solid #e2e8f0',
-      padding: '0.75rem 1.5rem',
+      padding: '0.4rem 1.5rem',
       display: 'flex',
       alignItems: 'center',
       justifyContent: 'space-between',
@@ -35,7 +35,7 @@ export default function Navbar({
             src="/logo.jpg"
             alt="QAdence - Trends & Analysis"
             style={{
-              height: '42px',
+              height: '84px',
               width: 'auto',
               objectFit: 'contain',
               display: 'block'

@@ -76,13 +76,13 @@ fs.copyFileSync(path.join(rootDir, 'package.json'), path.join(standaloneDir, 'pa
 console.log('Copying initial database...');
 fs.cpSync(path.join(rootDir, 'data'), path.join(standaloneDir, 'data'), { recursive: true });
 
-// 9. Create 1-click Windows Launcher (START_PATIENT_QA.bat)
+// 9. Create 1-click Windows Launchers (START_QADENCE.bat and START_PATIENT_QA.bat)
 const startBatContent = `@echo off
-title Patient QA Analytics (Offline Localhost Edition)
+title QAdence - Trends & Analysis (Offline Localhost Edition)
 cd /d "%~dp0"
 
 echo ======================================================================
-echo   Patient QA Analytics - Offline / Air-Gapped Local Edition
+echo   QAdence - Trends & Analysis (Offline / Air-Gapped Local Edition)
 echo ======================================================================
 echo.
 echo   * Self-contained: runs without Node.js installation
@@ -107,26 +107,29 @@ if errorlevel 1 (
   pause >nul
 )
 `;
+fs.writeFileSync(path.join(standaloneDir, 'START_QADENCE.bat'), startBatContent, 'utf8');
 fs.writeFileSync(path.join(standaloneDir, 'START_PATIENT_QA.bat'), startBatContent, 'utf8');
 
-// 10. Create 1-click Windows Stopper (STOP_PATIENT_QA.bat)
+// 10. Create 1-click Windows Stoppers (STOP_QADENCE.bat and STOP_PATIENT_QA.bat)
 const stopBatContent = `@echo off
-title Stop Patient QA Analytics
+title Stop QAdence
 cd /d "%~dp0"
-echo Stopping Patient QA local server...
+echo Stopping QAdence local server...
+taskkill /F /FI "WINDOWTITLE eq QAdence*" /T 2>nul
 taskkill /F /FI "WINDOWTITLE eq Patient QA Analytics*" /T 2>nul
 echo Done.
 timeout /t 2 >nul
 `;
+fs.writeFileSync(path.join(standaloneDir, 'STOP_QADENCE.bat'), stopBatContent, 'utf8');
 fs.writeFileSync(path.join(standaloneDir, 'STOP_PATIENT_QA.bat'), stopBatContent, 'utf8');
 
 // 11. Create README_AIRGAPPED.txt
 const readmeContent = `================================================================================
-PATIENT QA ANALYTICS - STANDALONE AIR-GAPPED DISTRIBUTION
+QADENCE: TRENDS & ANALYSIS - STANDALONE AIR-GAPPED DISTRIBUTION
 ================================================================================
 
 This package is a completely self-contained, offline distribution of the
-Patient QA Analytics application designed for air-gapped or network-isolated
+QAdence application designed for air-gapped or network-isolated
 workstations (e.g., Linac consoles, treatment planning systems, or clinical PCs).
 
 KEY SPECIFICATIONS:
@@ -147,17 +150,17 @@ KEY SPECIFICATIONS:
 HOW TO RUN:
 --------------------------------------------------------------------------------
 1. Copy or extract this folder to any location on the target machine (e.g. Desktop).
-2. Double-click "START_PATIENT_QA.bat".
+2. Double-click "START_QADENCE.bat".
 3. A terminal window will open and your default web browser will automatically
    navigate to:
        http://127.0.0.1:5000
-4. When finished, simply close the terminal window or run "STOP_PATIENT_QA.bat".
+4. When finished, simply close the terminal window or run "STOP_QADENCE.bat".
 
 FOLDER STRUCTURE:
 --------------------------------------------------------------------------------
 - node.exe              : Portable Node.js runtime executable
-- START_PATIENT_QA.bat  : 1-click application launcher
-- STOP_PATIENT_QA.bat   : Clean application shutdown script
+- START_QADENCE.bat     : 1-click application launcher
+- STOP_QADENCE.bat      : Clean application shutdown script
 - client/dist/          : Pre-compiled React frontend (HTML, JavaScript, CSS)
 - server/               : Application backend and analytics engine (Express)
 - node_modules/         : Pre-packaged runtime dependencies (better-sqlite3, etc.)

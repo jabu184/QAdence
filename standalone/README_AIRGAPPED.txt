@@ -1,9 +1,9 @@
 ================================================================================
-PATIENT QA ANALYTICS - STANDALONE AIR-GAPPED DISTRIBUTION
+QADENCE: TRENDS & ANALYSIS - STANDALONE AIR-GAPPED DISTRIBUTION
 ================================================================================
 
 This package is a completely self-contained, offline distribution of the
-Patient QA Analytics application designed for air-gapped or network-isolated
+QAdence application designed for air-gapped or network-isolated
 workstations (e.g., Linac consoles, treatment planning systems, or clinical PCs).
 
 KEY SPECIFICATIONS:
@@ -24,17 +24,17 @@ KEY SPECIFICATIONS:
 HOW TO RUN:
 --------------------------------------------------------------------------------
 1. Copy or extract this folder to any location on the target machine (e.g. Desktop).
-2. Double-click "START_PATIENT_QA.bat".
+2. Double-click "START_QADENCE.bat".
 3. A terminal window will open and your default web browser will automatically
    navigate to:
        http://127.0.0.1:5000
-4. When finished, simply close the terminal window or run "STOP_PATIENT_QA.bat".
+4. When finished, simply close the terminal window or run "STOP_QADENCE.bat".
 
 FOLDER STRUCTURE:
 --------------------------------------------------------------------------------
 - node.exe              : Portable Node.js runtime executable
-- START_PATIENT_QA.bat  : 1-click application launcher
-- STOP_PATIENT_QA.bat   : Clean application shutdown script
+- START_QADENCE.bat     : 1-click application launcher
+- STOP_QADENCE.bat      : Clean application shutdown script
 - client/dist/          : Pre-compiled React frontend (HTML, JavaScript, CSS)
 - server/               : Application backend and analytics engine (Express)
 - node_modules/         : Pre-packaged runtime dependencies (better-sqlite3, etc.)
