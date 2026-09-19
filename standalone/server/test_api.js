@@ -167,6 +167,82 @@ const server = app.listen(5099, async () => {
     }
     console.log('Preset CRUD verified successfully!');
 
+    console.log('Testing /api/presets/export and /api/presets/import...');
+    // Create two test presets
+    const p1 = db.prepare(`
+      INSERT INTO presets (name, description, config_json)
+      VALUES (?, ?, ?)
+    `).run('Preset Alpha', 'First test preset', JSON.stringify({ yVariable: 'Gamma Pass Rate (3%/3mm)', datasets: [{ id: 'ds-1', name: 'DS 1' }] })).lastInsertRowid;
+    const p2 = db.prepare(`
+      INSERT INTO presets (name, description, config_json)
+      VALUES (?, ?, ?)
+    `).run('Preset Beta', 'Second test preset', JSON.stringify({ yVariable: 'Median Dose Deviation (%)', datasets: [{ id: 'ds-2', name: 'DS 2' }] })).lastInsertRowid;
+
+    // Test export all
+    const exportAllRes = await axios.get(`${base}/presets/export`);
+    if (!exportAllRes.data || exportAllRes.data.app !== 'QAdence' || !Array.isArray(exportAllRes.data.presets) || exportAllRes.data.presets.length < 2) {
+      throw new Error('Export all presets failed or returned invalid envelope');
+    }
+
+    // Test export single preset
+    const exportSingleRes = await axios.get(`${base}/presets/export?id=${p1}`);
+    if (!exportSingleRes.data || exportSingleRes.data.presets.length !== 1 || exportSingleRes.data.presets[0].name !== 'Preset Alpha') {
+      throw new Error('Export single preset failed');
+    }
+
+    // Test import without overwrite (should generate (Imported))
+    const importNoOverwriteRes = await axios.post(`${base}/presets/import`, {
+      overwrite: false,
+      presets: [
+        {
+          name: 'Preset Alpha',
+          description: 'Imported duplicate',
+          config: { yVariable: 'Gamma Pass Rate (3%/3mm)', datasets: [{ id: 'ds-imp', name: 'Imported DS' }] }
+        }
+      ]
+    });
+    if (!importNoOverwriteRes.data.success || importNoOverwriteRes.data.importedCount !== 1) {
+      throw new Error('Import without overwrite failed');
+    }
+    const importedRow = db.prepare("SELECT * FROM presets WHERE name LIKE 'Preset Alpha (Imported%)'").get();
+    if (!importedRow) {
+      throw new Error('Import did not create duplicate with (Imported) suffix');
+    }
+
+    // Test import with overwrite (should update existing)
+    const importOverwriteRes = await axios.post(`${base}/presets/import`, {
+      overwrite: true,
+      presets: [
+        {
+          name: 'Preset Beta',
+          description: 'Beta description overwritten',
+          config: { yVariable: 'Overwritten Variable', datasets: [] }
+        }
+      ]
+    });
+    if (!importOverwriteRes.data.success || importOverwriteRes.data.updatedCount !== 1) {
+      throw new Error('Import with overwrite failed');
+    }
+    const overwrittenRow = db.prepare('SELECT * FROM presets WHERE id = ?').get(p2);
+    if (!overwrittenRow || overwrittenRow.description !== 'Beta description overwritten') {
+      throw new Error('Import did not overwrite existing preset');
+    }
+
+    // Test invalid import payload
+    try {
+      await axios.post(`${base}/presets/import`, { presets: [] });
+      throw new Error('Expected empty presets array to be rejected');
+    } catch (err) {
+      if (err.response?.status !== 400) {
+        throw new Error('Expected 400 status for empty import');
+      }
+    }
+
+    // Clean up created presets
+    db.prepare('DELETE FROM presets WHERE id IN (?, ?)').run(p1, p2);
+    db.prepare('DELETE FROM presets WHERE id = ?').run(importedRow.id);
+    console.log('Preset export and import verified successfully!');
+
     console.log('Testing /api/analysis/correlation with Python backend...');
     const corrRes = await axios.post(`${base}/analysis/correlation`, {
       datasets: [
@@ -316,9 +392,63 @@ const server = app.listen(5099, async () => {
     }
     console.log('Verified: /api/query strictly excludes rejected session when includeRejected is false!');
 
-    // Clean up test session
-    db.prepare('DELETE FROM test_values WHERE session_id = ?').run(sRej);
-    db.prepare('DELETE FROM sessions WHERE id = ?').run(sRej);
+    // Test Composite & Sublist Variable Extraction and Classification
+    console.log('Testing Composite & Sublist Variable Handling...');
+
+    // 1. Verify isNumericType heuristic
+    if (qatrackClient.isNumericType({ type: 'string', name: 'sag_max_mm', slug: 'sag_max_mm' }) !== 1) {
+      throw new Error('Expected sag_max_mm to be classified as numeric');
+    }
+    if (qatrackClient.isNumericType({ type: 'string', calculation_procedure: 'result = 42' }) !== 1) {
+      throw new Error('Expected test with calculation_procedure to be classified as numeric');
+    }
+    if (qatrackClient.isNumericType({ type: 'string', formatting: '%.2f' }) !== 1) {
+      throw new Error('Expected test with float formatting to be classified as numeric');
+    }
+    if (qatrackClient.isNumericType({ type: 'string', name: 'Site', slug: 'site' }) !== 0) {
+      throw new Error('Expected Site to be classified as categorical');
+    }
+    if (qatrackClient.isNumericType({ type: 'multchoice', name: 'Energy', slug: 'energy' }) !== 0) {
+      throw new Error('Expected multiple choice to be classified as categorical');
+    }
+
+    // 2. Verify extractTestInstanceValue
+    const v1 = qatrackClient.extractTestInstanceValue({ value: null, string_value: '0.473' });
+    if (v1.numVal !== 0.473 || v1.strVal !== '0.473') {
+      throw new Error(`Expected parsed 0.473, got ${JSON.stringify(v1)}`);
+    }
+    const v2 = qatrackClient.extractTestInstanceValue({ value: null, string_value: '98.5%' });
+    if (v2.numVal !== 98.5) {
+      throw new Error(`Expected parsed 98.5 from percentage string, got ${JSON.stringify(v2)}`);
+    }
+    const v3 = qatrackClient.extractTestInstanceValue({ value: null, string_value: '25.04 mm' });
+    if (v3.numVal !== 25.04) {
+      throw new Error(`Expected parsed 25.04 from string with units, got ${JSON.stringify(v3)}`);
+    }
+    const v4 = qatrackClient.extractTestInstanceValue({ value: null, string_value: '', json_value: { value: 12.34 } });
+    if (v4.numVal !== 12.34) {
+      throw new Error(`Expected parsed 12.34 from json_value object, got ${JSON.stringify(v4)}`);
+    }
+    const v5 = qatrackClient.extractTestInstanceValue({ value: null, string_value: 'PASS' });
+    if (v5.numVal !== null || v5.strVal !== 'PASS') {
+      throw new Error(`Expected null numVal and PASS strVal, got ${JSON.stringify(v5)}`);
+    }
+
+    // 3. Verify unit_test_infos table and resolveTestInstanceInfo fallback
+    db.prepare(`
+      INSERT OR REPLACE INTO unit_test_infos (id, unit_id, unit_url, test_id, test_name, test_slug, unit, data_type, is_numeric)
+      VALUES (555, 1, 'http://localhost/units/1/', 777, 'Leaf Speed Deviation', 'leaf_speed_dev', 'mm/s', 'string', 1)
+    `).run();
+
+    // Verify resolveTestInstanceInfo without memory map falls back to SQLite unit_test_infos
+    const resolvedFromDb = qatrackClient.resolveTestInstanceInfo({ unit_test_info: 555 }, new Map());
+    if (resolvedFromDb.testName !== 'Leaf Speed Deviation' || resolvedFromDb.isNumeric !== true) {
+      throw new Error(`Expected Leaf Speed Deviation from SQLite unit_test_infos, got ${JSON.stringify(resolvedFromDb)}`);
+    }
+
+    // Clean up dummy UTI
+    db.prepare('DELETE FROM unit_test_infos WHERE id = 555').run();
+    console.log('Verified: Composite calculations and UTI fallbacks handled correctly!');
 
     console.log('ALL API TESTS PASSED SUCCESSFULLY!');
   } catch (err) {

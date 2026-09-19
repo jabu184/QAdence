@@ -3,6 +3,7 @@ const router = express.Router();
 const db = require('../db');
 const qatrackClient = require('../qatrackClient');
 const path = require('path');
+const fs = require('fs');
 
 // 1. App Status & Health
 router.get('/status', (req, res) => {
@@ -128,6 +129,7 @@ router.post('/clear-data', (req, res) => {
       DELETE FROM test_lists;
       DELETE FROM test_definitions;
       DELETE FROM unit_test_collections;
+      DELETE FROM unit_test_infos;
     `);
     res.json({ success: true, message: 'All QA measurements, test definitions, and sessions cleared successfully.' });
   } catch (err) {
@@ -288,12 +290,14 @@ router.get('/schema/tests', (req, res) => {
 
     for (const t of ingested) {
       const key = `${t.test_name}::${t.test_list_name}`;
-      const isNumeric = t.numeric_count > (t.total_count * 0.5);
+      const existing = map.get(key);
+      const isNumericFromIngest = t.numeric_count > 0 && (t.numeric_count >= t.total_count * 0.25 || t.numeric_count >= 1);
+      const isNumeric = existing ? (existing.isNumeric || isNumericFromIngest) : isNumericFromIngest;
       map.set(key, {
         name: t.test_name,
         testList: t.test_list_name || 'General QA',
-        unit: t.unit || '',
-        isNumeric,
+        unit: t.unit || existing?.unit || '',
+        isNumeric: Boolean(isNumeric),
         totalCount: t.total_count,
         numericCount: t.numeric_count
       });
@@ -737,13 +741,178 @@ router.delete('/presets/:id', (req, res) => {
   }
 });
 
+// 9b. Export Presets as JSON
+router.get('/presets/export', (req, res) => {
+  try {
+    const { id } = req.query;
+    let presetRows = [];
+    let filename = '';
+
+    if (id) {
+      const row = db.prepare('SELECT * FROM presets WHERE id = ?').get(id);
+      if (!row) {
+        return res.status(404).json({ error: 'Preset not found.' });
+      }
+      presetRows = [row];
+      const safeName = (row.name || 'preset').replace(/[^a-zA-Z0-9_-]/g, '_').toLowerCase();
+      filename = `qadence_preset_${safeName}.json`;
+    } else {
+      presetRows = db.prepare('SELECT * FROM presets ORDER BY name ASC').all();
+      const dateStr = new Date().toISOString().split('T')[0];
+      filename = `qadence_presets_${dateStr}.json`;
+    }
+
+    const exportData = {
+      app: 'QAdence',
+      version: '1.0',
+      exportedAt: new Date().toISOString(),
+      presets: presetRows.map(p => {
+        let parsedConfig = {};
+        try {
+          parsedConfig = typeof p.config_json === 'string' ? JSON.parse(p.config_json) : (p.config || {});
+        } catch (_) {}
+        return {
+          name: p.name,
+          description: p.description || '',
+          config: parsedConfig
+        };
+      })
+    };
+
+    res.setHeader('Content-Type', 'application/json');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    res.json(exportData);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 9c. Import Presets from JSON
+router.post('/presets/import', (req, res) => {
+  try {
+    const payload = req.body;
+    let presetsToImport = [];
+    let overwrite = false;
+
+    if (Array.isArray(payload)) {
+      presetsToImport = payload;
+    } else if (payload && typeof payload === 'object') {
+      if (Array.isArray(payload.presets)) {
+        presetsToImport = payload.presets;
+        overwrite = Boolean(payload.overwrite);
+      } else if (payload.name && (payload.config || payload.config_json)) {
+        presetsToImport = [payload];
+        overwrite = Boolean(payload.overwrite);
+      }
+    }
+
+    if (!Array.isArray(presetsToImport) || presetsToImport.length === 0) {
+      return res.status(400).json({ error: 'No valid presets found in import payload.' });
+    }
+
+    const checkExisting = db.prepare('SELECT id, name FROM presets WHERE LOWER(name) = ?');
+    const updateStmt = db.prepare(`
+      UPDATE presets 
+      SET description = ?, config_json = ?, updated_at = CURRENT_TIMESTAMP 
+      WHERE id = ?
+    `);
+    const insertStmt = db.prepare(`
+      INSERT INTO presets (name, description, config_json, updated_at) 
+      VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+    `);
+
+    let importedCount = 0;
+    let updatedCount = 0;
+    const processedPresets = [];
+
+    const importTx = db.transaction(() => {
+      for (const p of presetsToImport) {
+        if (!p || typeof p !== 'object') continue;
+        const rawName = String(p.name || '').trim();
+        if (!rawName) continue;
+
+        let configObj = p.config;
+        if (!configObj && p.config_json) {
+          try {
+            configObj = typeof p.config_json === 'string' ? JSON.parse(p.config_json) : p.config_json;
+          } catch (_) {}
+        }
+        if (!configObj || typeof configObj !== 'object') {
+          continue; // Skip invalid presets
+        }
+
+        const configJson = JSON.stringify(configObj);
+        const description = String(p.description || '').trim();
+
+        const existing = checkExisting.get(rawName.toLowerCase());
+        if (existing && overwrite) {
+          updateStmt.run(description, configJson, existing.id);
+          updatedCount++;
+          processedPresets.push({ id: existing.id, name: rawName, action: 'updated' });
+        } else {
+          let finalName = rawName;
+          if (existing && !overwrite) {
+            let suffix = 1;
+            while (checkExisting.get(`${rawName} (Imported${suffix > 1 ? ` ${suffix}` : ''})`.toLowerCase())) {
+              suffix++;
+            }
+            finalName = `${rawName} (Imported${suffix > 1 ? ` ${suffix}` : ''})`;
+          }
+          const info = insertStmt.run(finalName, description, configJson);
+          importedCount++;
+          processedPresets.push({ id: info.lastInsertRowid, name: finalName, action: 'imported' });
+        }
+      }
+    });
+
+    importTx();
+
+    const allPresets = db.prepare('SELECT * FROM presets ORDER BY updated_at DESC').all().map(p => ({
+      ...p,
+      config: JSON.parse(p.config_json)
+    }));
+
+    res.json({
+      success: true,
+      importedCount,
+      updatedCount,
+      totalProcessed: processedPresets.length,
+      processed: processedPresets,
+      presets: allPresets
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // 10. Statistical Correlation Analysis (Pearson & Non-Parametric)
 const { spawn } = require('child_process');
+const { calculateCorrelationJS } = require('../scripts/correlation_fallback');
+
+function getPythonExecutable() {
+  if (process.env.PYTHON_PATH && fs.existsSync(process.env.PYTHON_PATH)) {
+    return process.env.PYTHON_PATH;
+  }
+  const candidates = [
+    path.join(__dirname, '..', '..', 'python', 'python.exe'),
+    path.join(__dirname, '..', 'python', 'python.exe'),
+    path.join(process.cwd(), 'python', 'python.exe'),
+    path.join(process.cwd(), '..', 'python', 'python.exe'),
+    'C:\\Users\\vboxuser\\AppData\\Local\\Python\\pythoncore-3.14-64\\python.exe'
+  ];
+  for (const c of candidates) {
+    if (fs.existsSync(c)) {
+      return c;
+    }
+  }
+  return 'python';
+}
 
 function runPythonCorrelation(payload) {
   return new Promise((resolve, reject) => {
     const scriptPath = path.join(__dirname, '..', 'scripts', 'correlation.py');
-    const py = spawn('python', [scriptPath], { windowsHide: true });
+    const pyExe = getPythonExecutable();
+    const py = spawn(pyExe, [scriptPath], { windowsHide: true });
 
     let stdout = '';
     let stderr = '';
@@ -778,13 +947,22 @@ function runPythonCorrelation(payload) {
 }
 
 router.post('/analysis/correlation', async (req, res) => {
+  const { datasets = [], xName = 'X Variable', yName = 'Y Variable', measure = 'all' } = req.body;
   try {
-    const { datasets = [], xName = 'X Variable', yName = 'Y Variable', measure = 'all' } = req.body;
     const result = await runPythonCorrelation({ datasets, xName, yName, measure });
-    res.json(result);
+    if (result && result.success) {
+      return res.json(result);
+    }
+    throw new Error(result?.error || 'Python returned unsuccessful result');
   } catch (err) {
-    console.warn('Python correlation execution warning:', err.message);
-    res.status(500).json({ error: err.message });
+    console.warn('Python correlation execution warning (falling back to built-in JS engine):', err.message);
+    try {
+      const fallbackResult = calculateCorrelationJS({ datasets, xName, yName, measure });
+      return res.json(fallbackResult);
+    } catch (fallbackErr) {
+      console.error('Correlation analysis failed completely:', fallbackErr);
+      return res.status(500).json({ error: fallbackErr.message });
+    }
   }
 });
 

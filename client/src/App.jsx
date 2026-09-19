@@ -6,6 +6,7 @@ import DatasetComparisonTable from './components/DatasetComparisonTable';
 import DataTable from './components/DataTable';
 import SettingsModal from './components/SettingsModal';
 import SavePresetModal from './components/SavePresetModal';
+import PresetImportModal from './components/PresetImportModal';
 import SyncProgressModal from './components/SyncProgressModal';
 import { BarChart3, Table as TableIcon, RefreshCw } from 'lucide-react';
 import { calculateStats, computeLinearRegression } from './utils/math';
@@ -73,6 +74,7 @@ export default function App() {
   // Modals state
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isSavePresetOpen, setIsSavePresetOpen] = useState(false);
+  const [isImportPresetOpen, setIsImportPresetOpen] = useState(false);
   const [isSyncModalOpen, setIsSyncModalOpen] = useState(false);
   const [syncStatus, setSyncStatus] = useState({
     isRunning: false,
@@ -499,10 +501,11 @@ export default function App() {
   };
 
   // Handle Presets
-  const handleSelectPreset = (id) => {
+  const handleSelectPreset = (id, overridePresets) => {
     setSelectedPresetId(id);
     if (!id) return;
-    const preset = presets.find(p => String(p.id) === String(id));
+    const pool = overridePresets || presets;
+    const preset = pool.find(p => String(p.id) === String(id));
     if (preset && preset.config) {
       const cfg = preset.config;
       if (cfg.xVariable !== undefined) setXVariable(cfg.xVariable);
@@ -528,6 +531,36 @@ export default function App() {
           }
         ]);
         setActiveDatasetId('ds-1');
+      }
+    }
+  };
+
+  const handleExportPresets = () => {
+    if (presets.length === 0) {
+      alert('No presets saved to export.');
+      return;
+    }
+    const url = selectedPresetId
+      ? `/api/presets/export?id=${encodeURIComponent(selectedPresetId)}`
+      : '/api/presets/export';
+    const link = document.createElement('a');
+    link.href = url;
+    link.setAttribute('download', '');
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
+
+  const handleImportSuccess = async (data) => {
+    await loadMetadata();
+    const updatedPresets = data?.presets || [];
+    if (updatedPresets.length > 0) {
+      setPresets(updatedPresets);
+    }
+    if (data?.processed?.length > 0) {
+      const firstId = data.processed[0].id;
+      if (firstId) {
+        handleSelectPreset(firstId, updatedPresets);
       }
     }
   };
@@ -803,6 +836,8 @@ export default function App() {
         onSelectPreset={handleSelectPreset}
         onOpenSettings={() => setIsSettingsOpen(true)}
         onOpenSavePreset={() => setIsSavePresetOpen(true)}
+        onOpenImportPreset={() => setIsImportPresetOpen(true)}
+        onExportPreset={handleExportPresets}
         onDeletePreset={handleDeletePreset}
         onSync={handleSync}
         onClearData={handleClearData}
@@ -950,6 +985,12 @@ export default function App() {
         onSaved={loadMetadata}
         presets={presets}
         activePresetId={selectedPresetId}
+      />
+
+      <PresetImportModal
+        isOpen={isImportPresetOpen}
+        onClose={() => setIsImportPresetOpen(false)}
+        onImportSuccess={handleImportSuccess}
       />
 
       <SyncProgressModal

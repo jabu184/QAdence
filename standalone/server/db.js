@@ -116,6 +116,20 @@ db.exec(`
     valid INTEGER DEFAULT 1,
     is_rejected INTEGER DEFAULT 0
   );
+
+  CREATE TABLE IF NOT EXISTS unit_test_infos (
+    id INTEGER PRIMARY KEY,
+    unit_id INTEGER,
+    unit_url TEXT,
+    test_id INTEGER,
+    test_name TEXT NOT NULL,
+    test_slug TEXT,
+    unit TEXT,
+    data_type TEXT,
+    is_numeric INTEGER DEFAULT 1
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_uti_test_name ON unit_test_infos(test_name);
 `);
 
 // Safe migrations for existing databases

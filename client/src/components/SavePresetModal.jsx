@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { X, Bookmark } from 'lucide-react';
+import { X, Bookmark, Download } from 'lucide-react';
 
 export default function SavePresetModal({
   isOpen,
@@ -89,6 +89,33 @@ export default function SavePresetModal({
     } finally {
       setIsSaving(false);
     }
+  };
+
+  const handleDownloadJson = () => {
+    const presetName = name.trim() || 'QA_Preset';
+    const exportEnvelope = {
+      app: 'QAdence',
+      version: '1.0',
+      exportedAt: new Date().toISOString(),
+      presets: [
+        {
+          name: presetName,
+          description: description.trim(),
+          config: currentConfig
+        }
+      ]
+    };
+    const jsonStr = JSON.stringify(exportEnvelope, null, 2);
+    const blob = new Blob([jsonStr], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    const safeName = presetName.replace(/[^a-zA-Z0-9_-]/g, '_').toLowerCase();
+    link.href = url;
+    link.download = `qadence_preset_${safeName}.json`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
   };
 
   return (
@@ -233,37 +260,61 @@ export default function SavePresetModal({
             />
           </div>
 
-          <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '0.5rem', marginTop: '0.75rem' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '1rem' }}>
             <button
               type="button"
-              onClick={onClose}
+              onClick={handleDownloadJson}
+              title="Download current preset configuration as a JSON file without saving to server"
               style={{
-                padding: '0.45rem 0.9rem',
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: '5px',
+                padding: '0.45rem 0.8rem',
                 borderRadius: '8px',
                 border: '1px solid #cbd5e1',
-                background: '#ffffff',
-                color: '#475569',
-                fontSize: '0.85rem'
+                background: '#f8fafc',
+                color: '#334155',
+                fontSize: '0.82rem',
+                fontWeight: '500',
+                cursor: 'pointer'
               }}
             >
-              Cancel
+              <Download size={14} color="#0284c7" /> Download JSON
             </button>
-            <button
-              type="submit"
-              disabled={isSaving}
-              style={{
-                padding: '0.45rem 1.15rem',
-                borderRadius: '8px',
-                background: mode === 'overwrite' ? '#ea580c' : '#2563eb',
-                color: '#ffffff',
-                fontSize: '0.85rem',
-                fontWeight: '600',
-                border: 'none',
-                cursor: isSaving ? 'not-allowed' : 'pointer'
-              }}
-            >
-              {isSaving ? 'Saving...' : (mode === 'overwrite' ? 'Overwrite Preset' : 'Save New Preset')}
-            </button>
+
+            <div style={{ display: 'flex', gap: '0.5rem' }}>
+              <button
+                type="button"
+                onClick={onClose}
+                style={{
+                  padding: '0.45rem 0.9rem',
+                  borderRadius: '8px',
+                  border: '1px solid #cbd5e1',
+                  background: '#ffffff',
+                  color: '#475569',
+                  fontSize: '0.85rem',
+                  cursor: 'pointer'
+                }}
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                disabled={isSaving}
+                style={{
+                  padding: '0.45rem 1.15rem',
+                  borderRadius: '8px',
+                  background: mode === 'overwrite' ? '#ea580c' : '#2563eb',
+                  color: '#ffffff',
+                  fontSize: '0.85rem',
+                  fontWeight: '600',
+                  border: 'none',
+                  cursor: isSaving ? 'not-allowed' : 'pointer'
+                }}
+              >
+                {isSaving ? 'Saving...' : (mode === 'overwrite' ? 'Overwrite Preset' : 'Save New Preset')}
+              </button>
+            </div>
           </div>
         </form>
       </div>

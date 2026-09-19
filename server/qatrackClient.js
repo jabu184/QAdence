@@ -318,12 +318,14 @@ class QATrackClient {
         DELETE FROM units;
         DELETE FROM unit_test_collections;
         DELETE FROM test_instance_statuses;
+        DELETE FROM unit_test_infos;
       `);
     } else {
       // Clear stale metadata discovery tables so mock/unused definitions never linger
       db.exec(`
         DELETE FROM test_definitions;
         DELETE FROM unit_test_collections;
+        DELETE FROM unit_test_infos;
       `);
     }
 
@@ -501,10 +503,13 @@ class QATrackClient {
       const id = t.id || this.extractIdFromUrl(t.url);
       const testName = t.display_name || t.name;
       const testInfo = {
+        id,
         name: testName,
         slug: t.slug || '',
         type: t.type || 'simple',
-        unit: t.unit || ''
+        unit: t.unit || '',
+        calculation_procedure: t.calculation_procedure || '',
+        formatting: t.formatting || ''
       };
       if (id) testDefMap.set(id, testInfo);
       if (t.url) testDefMap.set(t.url, testInfo);
@@ -522,6 +527,11 @@ class QATrackClient {
     }
 
     const utiMap = new Map();
+    const insertUtiStmt = db.prepare(`
+      INSERT OR REPLACE INTO unit_test_infos (id, unit_id, unit_url, test_id, test_name, test_slug, unit, data_type, is_numeric)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+
     for (const uti of unitTestInfos) {
       const isUtiActive = (uti.is_active !== undefined) ? Boolean(uti.is_active) : ((uti.active !== undefined) ? Boolean(uti.active) : true);
       const utiUnitId = uti.unit ? (typeof uti.unit === 'number' ? uti.unit : this.extractIdFromUrl(uti.unit)) : null;
@@ -531,15 +541,41 @@ class QATrackClient {
 
       const id = uti.id || this.extractIdFromUrl(uti.url);
       const testDef = testDefMap.get(uti.test) || (uti.test && testDefMap.get(this.extractIdFromUrl(uti.test)));
+      const isNum = this.isNumericType(testDef || uti.type);
+      const testName = testDef?.name || 'Unknown Test';
+      const testSlug = testDef?.slug || '';
+      const unit = testDef?.unit || '';
+      const type = testDef?.type || 'simple';
+      const testId = typeof uti.test === 'number' ? uti.test : this.extractIdFromUrl(uti.test);
+
+      if (id) {
+        try {
+          insertUtiStmt.run(id, utiUnitId, typeof uti.unit === 'string' ? uti.unit : '', testId, testName, testSlug, unit, type, isNum);
+        } catch (_) {}
+      }
+
       const utiInfo = {
+        id,
         unitUrl: uti.unit,
-        testName: testDef?.name || 'Unknown Test',
-        testSlug: testDef?.slug || '',
-        unit: testDef?.unit || '',
-        type: testDef?.type || 'simple'
+        unitId: utiUnitId,
+        testId,
+        testName,
+        testSlug,
+        unit,
+        type,
+        isNumeric: isNum === 1
       };
-      if (id) utiMap.set(id, utiInfo);
-      if (uti.url) utiMap.set(uti.url, utiInfo);
+      if (id) {
+        utiMap.set(id, utiInfo);
+        utiMap.set(String(id), utiInfo);
+      }
+      if (uti.url) {
+        utiMap.set(uti.url, utiInfo);
+        utiMap.set(uti.url.replace(/\/$/, ''), utiInfo);
+        const relUrl = uti.url.replace(/^https?:\/\/[^\/]+/, '');
+        utiMap.set(relUrl, utiInfo);
+        utiMap.set(relUrl.replace(/\/$/, ''), utiInfo);
+      }
     }
 
     // 5. Unit Test Collections (filter out non-active assignments)
@@ -655,16 +691,51 @@ class QATrackClient {
       }
     }
 
+    // Map test lists by ID and URL for recursive sublist traversal
+    const testListsById = new Map();
+    for (const tl of testLists) {
+      const id = tl.id || this.extractIdFromUrl(tl.url);
+      if (id) {
+        testListsById.set(id, tl);
+        testListsById.set(String(id), tl);
+      }
+      if (tl.url) testListsById.set(tl.url, tl);
+    }
+
+    const getAllTestsForTestList = (tlOrId, visited = new Set()) => {
+      const allTestRefs = [];
+      const tl = (typeof tlOrId === 'object' && tlOrId !== null)
+        ? tlOrId
+        : testListsById.get(tlOrId) || testListsById.get(this.extractIdFromUrl(tlOrId));
+      if (!tl) return allTestRefs;
+
+      const tlId = tl.id || this.extractIdFromUrl(tl.url);
+      if (tlId) {
+        if (visited.has(tlId)) return allTestRefs;
+        visited.add(tlId);
+      }
+
+      if (Array.isArray(tl.tests)) {
+        for (const tRef of tl.tests) {
+          allTestRefs.push(tRef);
+        }
+      }
+
+      if (Array.isArray(tl.test_lists)) {
+        for (const subRef of tl.test_lists) {
+          const subTests = getAllTestsForTestList(subRef, visited);
+          allTestRefs.push(...subTests);
+        }
+      }
+
+      return allTestRefs;
+    };
+
     // Populate test_definitions in database ONLY from active collections
     const insertTestDef = db.prepare(`
       INSERT OR REPLACE INTO test_definitions (name, slug, test_list_name, unit, data_type, is_numeric)
       VALUES (?, ?, ?, ?, ?, ?)
     `);
-
-    const isNumericType = (tType) => {
-      const t = (tType || 'simple').toLowerCase();
-      return (t === 'simple' || t === 'numerical' || t === 'composite' || t === 'calculation') ? 1 : 0;
-    };
 
     // Populate only from ACTIVE unit test collections
     for (const c of collections) {
@@ -675,27 +746,38 @@ class QATrackClient {
       const testListName = colInfo.testListName || testListMap.get(c.tests_object) || c.name;
       if (!testListName) continue;
 
+      const rawTl = c.tests_object || c.test_list || c.testlist || c.tests;
+      if (rawTl) {
+        const allTests = getAllTestsForTestList(rawTl);
+        for (const tRef of allTests) {
+          const t = testDefMap.get(tRef) || (typeof tRef === 'string' && testDefMap.get(this.extractIdFromUrl(tRef)));
+          if (t && t.name) {
+            insertTestDef.run(t.name, t.slug, testListName, t.unit || '', t.type, this.isNumericType(t));
+          }
+        }
+      }
+
       if (Array.isArray(c.tests)) {
         for (const utiRef of c.tests) {
           const uti = utiMap.get(utiRef) || (typeof utiRef === 'string' && utiMap.get(this.extractIdFromUrl(utiRef)));
           if (uti && uti.testName) {
-            insertTestDef.run(uti.testName, uti.testSlug, testListName, uti.unit || '', uti.type, isNumericType(uti.type));
+            const tDef = testDefMap.get(uti.testId) || { type: uti.type, unit: uti.unit, name: uti.testName, slug: uti.testSlug };
+            insertTestDef.run(uti.testName, uti.testSlug, testListName, uti.unit || '', uti.type, this.isNumericType(tDef));
           }
         }
       }
     }
 
-    // Also populate from test lists directly IF they have active assignments or data
+    // Also populate from test lists directly IF they have active assignments or data (including sublists!)
     for (const tl of testLists) {
       const id = tl.id || this.extractIdFromUrl(tl.url);
       if (!testListMap.has(id)) continue; // Skip test lists with no data!
 
-      if (Array.isArray(tl.tests)) {
-        for (const tRef of tl.tests) {
-          const t = testDefMap.get(tRef) || (typeof tRef === 'string' && testDefMap.get(this.extractIdFromUrl(tRef)));
-          if (t && t.name) {
-            insertTestDef.run(t.name, t.slug, tl.name, t.unit || '', t.type, isNumericType(t.type));
-          }
+      const allTests = getAllTestsForTestList(tl);
+      for (const tRef of allTests) {
+        const t = testDefMap.get(tRef) || (typeof tRef === 'string' && testDefMap.get(this.extractIdFromUrl(tRef)));
+        if (t && t.name) {
+          insertTestDef.run(t.name, t.slug, tl.name, t.unit || '', t.type, this.isNumericType(t));
         }
       }
     }
@@ -838,6 +920,191 @@ class QATrackClient {
     };
   }
 
+  isNumericType(testDefOrType) {
+    if (!testDefOrType) return 1;
+    if (typeof testDefOrType === 'string') {
+      const t = testDefOrType.toLowerCase();
+      if (t === 'simple' || t === 'numerical' || t === 'composite' || t === 'calculation' || t === 'string_composite' || t === 'line') {
+        return 1;
+      }
+      if (t === 'multchoice' || t === 'upload' || t === 'date' || t === 'datetime' || t === 'time') {
+        return 0;
+      }
+      return 0;
+    }
+    const t = (testDefOrType.type || 'simple').toLowerCase();
+    if (t === 'simple' || t === 'numerical' || t === 'composite' || t === 'calculation' || t === 'string_composite' || t === 'line') {
+      return 1;
+    }
+    if (testDefOrType.calculation_procedure && String(testDefOrType.calculation_procedure).trim()) {
+      return 1;
+    }
+    if (testDefOrType.formatting && /%[.\d]*[fdeEgG]/.test(testDefOrType.formatting)) {
+      return 1;
+    }
+    const name = (testDefOrType.name || testDefOrType.display_name || '').toLowerCase();
+    const slug = (testDefOrType.slug || '').toLowerCase();
+    if (
+      name.includes('(%)') || name.includes('(mm)') || name.includes('(cgy') ||
+      name.includes('(kpa)') || name.includes('(°c)') || name.includes('(deg)') ||
+      slug.endsWith('_pct') || slug.endsWith('_mm') || slug.endsWith('_deg') ||
+      slug.endsWith('_cgy') || slug.endsWith('_mu') || slug.endsWith('_diff') ||
+      slug.endsWith('_dev') || slug.endsWith('_rate') || slug.endsWith('_val')
+    ) {
+      return 1;
+    }
+    if (t === 'multchoice' || t === 'upload' || t === 'date' || t === 'datetime' || t === 'time') {
+      return 0;
+    }
+    return 0;
+  }
+
+  async getOrLoadUtiMap(endpoints = null) {
+    if (this.cachedMetadata?.utiMap && this.cachedMetadata.utiMap.size > 0) {
+      return this.cachedMetadata.utiMap;
+    }
+
+    const utiMap = new Map();
+
+    // 1. Try loading from SQLite
+    try {
+      const dbUtis = db.prepare('SELECT id, unit_id, unit_url, test_id, test_name, test_slug, unit, data_type, is_numeric FROM unit_test_infos').all();
+      for (const u of dbUtis) {
+        const utiInfo = {
+          id: u.id,
+          unitId: u.unit_id,
+          unitUrl: u.unit_url,
+          testId: u.test_id,
+          testName: u.test_name,
+          testSlug: u.test_slug,
+          unit: u.unit || '',
+          type: u.data_type || 'simple',
+          isNumeric: u.is_numeric === 1
+        };
+        utiMap.set(u.id, utiInfo);
+        utiMap.set(String(u.id), utiInfo);
+        if (this.baseUrl) {
+          utiMap.set(`${this.baseUrl}/api/qc/unittestinfos/${u.id}/`, utiInfo);
+          utiMap.set(`${this.baseUrl}/api/qc/unittestinfos/${u.id}`, utiInfo);
+        }
+        utiMap.set(`/api/qc/unittestinfos/${u.id}/`, utiInfo);
+        utiMap.set(`/api/qc/unittestinfos/${u.id}`, utiInfo);
+      }
+    } catch (_) {}
+
+    // 2. If empty and endpoints provided, fetch metadata
+    if (utiMap.size === 0 && (endpoints || this.baseUrl)) {
+      try {
+        const ep = endpoints || await this.discoverEndpoints();
+        const meta = await this.fetchMetadata(ep, false);
+        this.cachedMetadata = meta;
+        return meta.utiMap;
+      } catch (err) {
+        console.warn('Could not load UTIs from API:', err.message);
+      }
+    }
+
+    return utiMap;
+  }
+
+  resolveTestInstanceInfo(ti, utiMap) {
+    if (!ti) return { testName: 'Test', testSlug: '', unit: '', isNumeric: false };
+
+    let utiInfo = null;
+    if (ti.unit_test_info) {
+      utiInfo = utiMap?.get(ti.unit_test_info) ||
+                utiMap?.get(this.extractIdFromUrl(ti.unit_test_info)) ||
+                utiMap?.get(String(ti.unit_test_info));
+      if (!utiInfo && typeof ti.unit_test_info === 'string') {
+        utiInfo = utiMap?.get(ti.unit_test_info.replace(/\/$/, ''));
+      }
+    }
+
+    let testName = utiInfo?.testName || ti.name || ti.test_name;
+    let testSlug = utiInfo?.testSlug || ti.slug || ti.test_slug || '';
+    let unit = utiInfo?.unit || ti.unit || '';
+    let isNumeric = utiInfo?.isNumeric ?? false;
+
+    if (!testName && ti.unit_test_info) {
+      const utiId = typeof ti.unit_test_info === 'number' ? ti.unit_test_info : this.extractIdFromUrl(ti.unit_test_info);
+      if (utiId) {
+        try {
+          const dbUti = db.prepare('SELECT test_name, test_slug, unit, is_numeric FROM unit_test_infos WHERE id = ?').get(utiId);
+          if (dbUti) {
+            testName = dbUti.test_name;
+            testSlug = dbUti.test_slug || testSlug;
+            unit = dbUti.unit || unit;
+            isNumeric = dbUti.is_numeric === 1;
+          }
+        } catch (_) {}
+      }
+    }
+
+    if (!testName) {
+      testName = 'Test';
+    }
+
+    return { testName, testSlug, unit, isNumeric };
+  }
+
+  extractTestInstanceValue(ti) {
+    let numVal = null;
+    let strVal = '';
+
+    // 1. Direct number on ti.value
+    if (typeof ti.value === 'number') {
+      numVal = ti.value;
+      strVal = String(ti.value);
+    } else if (ti.value !== null && ti.value !== undefined && ti.value !== '') {
+      const clean = String(ti.value).trim().replace(/%/g, '').replace(/,/g, '');
+      const parsed = parseFloat(clean);
+      if (!isNaN(parsed)) numVal = parsed;
+      strVal = String(ti.value);
+    }
+
+    // 2. String value (very common for QATrack+ calculation & composite tests)
+    if (ti.string_value !== undefined && ti.string_value !== null && String(ti.string_value).trim() !== '') {
+      strVal = String(ti.string_value).trim();
+      if (numVal === null) {
+        // Handle percentages (e.g. "98.5%"), units attached (e.g. "0.473 mm", "25.04 cGy"), comma decimals
+        const cleanStr = strVal.replace(/%/g, '').replace(/,/g, '').trim();
+        const numMatch = cleanStr.match(/^[-+]?[0-9]*\.?[0-9]+([eE][-+]?[0-9]+)?/);
+        if (numMatch) {
+          const parsed = parseFloat(numMatch[0]);
+          if (!isNaN(parsed)) numVal = parsed;
+        }
+      }
+    } else if (ti.date_value) {
+      strVal = ti.date_value;
+    }
+
+    // 3. JSON value (calculation tests that return JSON objects or numbers)
+    if (ti.json_value !== undefined && ti.json_value !== null && ti.json_value !== '') {
+      let jVal = ti.json_value;
+      if (typeof jVal === 'string') {
+        try { jVal = JSON.parse(jVal); } catch (_) {}
+      }
+      if (typeof jVal === 'number') {
+        if (numVal === null) numVal = jVal;
+        if (!strVal) strVal = String(jVal);
+      } else if (typeof jVal === 'object' && jVal !== null) {
+        const candidate = jVal.value ?? jVal.val ?? jVal.result ?? jVal.reading ?? (Array.isArray(jVal) ? jVal[0] : null);
+        if (typeof candidate === 'number') {
+          if (numVal === null) numVal = candidate;
+          if (!strVal) strVal = String(candidate);
+        } else if (typeof candidate === 'string') {
+          if (!strVal) strVal = candidate;
+          if (numVal === null) {
+            const parsed = parseFloat(candidate.replace(/%/g, '').replace(/,/g, '').trim());
+            if (!isNaN(parsed)) numVal = parsed;
+          }
+        }
+      }
+    }
+
+    return { numVal, strVal };
+  }
+
   async syncMetadata(options = {}) {
     this.reloadConfig();
     const startTime = Date.now();
@@ -941,8 +1208,11 @@ class QATrackClient {
           utcMap.set(String(c.id), colInfo);
         }
 
-        // If local metadata is missing units, test lists, or collections, do a metadata fetch once
-        if (dbUnits.length === 0 || dbLists.length === 0 || dbUtcs.length === 0) {
+        utiMap = await this.getOrLoadUtiMap(endpoints);
+
+        // If local metadata is missing units, test lists, collections, or UTIs, do a metadata fetch once
+        const dbUtiCount = db.prepare('SELECT COUNT(*) as count FROM unit_test_infos').get()?.count || 0;
+        if (dbUnits.length === 0 || dbLists.length === 0 || dbUtcs.length === 0 || dbUtiCount === 0 || utiMap.size === 0) {
           const meta = await this.fetchMetadata(endpoints, false);
           this.cachedMetadata = meta;
           unitMap = meta.unitMap;
@@ -1125,39 +1395,16 @@ class QATrackClient {
                 continue;
               }
 
-              const utiInfo = utiMap.get(ti.unit_test_info) || (ti.unit_test_info && utiMap.get(this.extractIdFromUrl(ti.unit_test_info)));
-              const testName = utiInfo?.testName || ti.name || ti.test_name || 'Test';
-              const testSlug = utiInfo?.testSlug || ti.slug || ti.test_slug || '';
-
-              let numVal = null;
-              let strVal = '';
-
-              if (typeof ti.value === 'number') {
-                numVal = ti.value;
-                strVal = String(ti.value);
-              } else if (ti.value !== null && ti.value !== undefined && ti.value !== '') {
-                const parsed = parseFloat(ti.value);
-                if (!isNaN(parsed)) numVal = parsed;
-                strVal = String(ti.value);
-              }
-
-              if (ti.string_value) {
-                strVal = ti.string_value;
-                if (numVal === null) {
-                  const parsed = parseFloat(ti.string_value);
-                  if (!isNaN(parsed)) numVal = parsed;
-                }
-              } else if (ti.date_value) {
-                strVal = ti.date_value;
-              }
+              const tiInfo = this.resolveTestInstanceInfo(ti, utiMap);
+              const { numVal, strVal } = this.extractTestInstanceValue(ti);
 
               insertTestVal.run(
                 sess.id,
-                testName,
-                testSlug,
+                tiInfo.testName,
+                tiInfo.testSlug,
                 strVal,
                 numVal,
-                utiInfo?.unit || ti.unit || '',
+                tiInfo.unit,
                 null,
                 null,
                 tiStatusInfo.isRejected ? 'Rejected' : (tiStatusInfo.requiresReview ? 'Unreviewed' : (ti.pass_fail || 'OK'))
@@ -1634,39 +1881,16 @@ class QATrackClient {
                 continue;
               }
 
-              const utiInfo = utiMap.get(ti.unit_test_info) || (ti.unit_test_info && utiMap.get(this.extractIdFromUrl(ti.unit_test_info)));
-              const testName = utiInfo?.testName || ti.name || ti.test_name || 'Test';
-              const testSlug = utiInfo?.testSlug || ti.slug || ti.test_slug || '';
-
-              let numVal = null;
-              let strVal = '';
-
-              if (typeof ti.value === 'number') {
-                numVal = ti.value;
-                strVal = String(ti.value);
-              } else if (ti.value !== null && ti.value !== undefined && ti.value !== '') {
-                const parsed = parseFloat(ti.value);
-                if (!isNaN(parsed)) numVal = parsed;
-                strVal = String(ti.value);
-              }
-
-              if (ti.string_value) {
-                strVal = ti.string_value;
-                if (numVal === null) {
-                  const parsed = parseFloat(ti.string_value);
-                  if (!isNaN(parsed)) numVal = parsed;
-                }
-              } else if (ti.date_value) {
-                strVal = ti.date_value;
-              }
+              const tiInfo = this.resolveTestInstanceInfo(ti, utiMap);
+              const { numVal, strVal } = this.extractTestInstanceValue(ti);
 
               insertTestVal.run(
                 sess.id,
-                testName,
-                testSlug,
+                tiInfo.testName,
+                tiInfo.testSlug,
                 strVal,
                 numVal,
-                utiInfo?.unit || ti.unit || '',
+                tiInfo.unit,
                 null,
                 null,
                 tiStatusInfo.isRejected ? 'Rejected' : (tiStatusInfo.requiresReview ? 'Unreviewed' : (ti.pass_fail || 'OK'))

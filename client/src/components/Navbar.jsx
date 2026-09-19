@@ -1,5 +1,5 @@
 import React from 'react';
-import { Activity, RefreshCw, Settings, Database, Bookmark, PlusCircle, Trash2, RotateCcw, Sparkles } from 'lucide-react';
+import { Activity, RefreshCw, Settings, Database, Bookmark, PlusCircle, Trash2, RotateCcw, Sparkles, Download, Upload } from 'lucide-react';
 
 export default function Navbar({
   status,
@@ -8,6 +8,8 @@ export default function Navbar({
   onSelectPreset,
   onOpenSettings,
   onOpenSavePreset,
+  onOpenImportPreset,
+  onExportPreset,
   onDeletePreset,
   onSync,
   onClearData,
@@ -138,6 +140,44 @@ export default function Navbar({
             }}
           >
             <PlusCircle size={14} /> Save
+          </button>
+
+          <button
+            onClick={onExportPreset}
+            title={selectedPreset ? "Export selected preset as JSON file" : "Export all presets as JSON file"}
+            style={{
+              padding: '0.45rem 0.65rem',
+              borderRadius: '8px',
+              border: '1px solid #cbd5e1',
+              background: '#ffffff',
+              color: '#475569',
+              fontSize: '0.8rem',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '4px',
+              cursor: 'pointer'
+            }}
+          >
+            <Download size={14} /> Export
+          </button>
+
+          <button
+            onClick={onOpenImportPreset}
+            title="Import QA presets from JSON file"
+            style={{
+              padding: '0.45rem 0.65rem',
+              borderRadius: '8px',
+              border: '1px solid #cbd5e1',
+              background: '#ffffff',
+              color: '#475569',
+              fontSize: '0.8rem',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '4px',
+              cursor: 'pointer'
+            }}
+          >
+            <Upload size={14} /> Import
           </button>
 
           {activePreset?.description && (

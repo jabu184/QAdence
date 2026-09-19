@@ -8,7 +8,8 @@
     "server": "node server/index.js",
     "client": "npm --prefix client run dev",
     "build": "npm --prefix client run build",
-    "test": "node server/test_api.js"
+    "test": "node server/test_api.js",
+    "package:standalone": "node scripts/make_standalone.js"
   },
   "keywords": [],
   "author": "",
