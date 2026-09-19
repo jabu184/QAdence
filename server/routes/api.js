@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const db = require('../db');
 const qatrackClient = require('../qatrackClient');
+const path = require('path');
 
 // 1. App Status & Health
 router.get('/status', (req, res) => {
@@ -14,6 +15,7 @@ router.get('/status', (req, res) => {
 
     const config = qatrackClient.getConfig();
 
+    res.set('Cache-Control', 'no-store, no-cache, must-revalidate, private');
     res.json({
       status: 'ok',
       db: {
@@ -27,7 +29,9 @@ router.get('/status', (req, res) => {
         configured: !!(config.baseUrl && config.hasToken),
         baseUrl: config.baseUrl,
         hasToken: config.hasToken,
-        authType: config.authType
+        authType: config.authType,
+        includeUnapproved: config.includeUnapproved,
+        includeRejected: config.includeRejected
       }
     });
   } catch (err) {
@@ -37,19 +41,28 @@ router.get('/status', (req, res) => {
 
 // 2. QATrack+ Configuration
 router.get('/config', (req, res) => {
+  res.set('Cache-Control', 'no-store, no-cache, must-revalidate, private');
   res.json(qatrackClient.getConfig());
 });
 
 router.post('/config', (req, res) => {
   try {
-    const { baseUrl, token, authType } = req.body;
+    const { baseUrl, token, authType, includeUnapproved, includeRejected } = req.body;
     let tokenToSave = token;
     if (tokenToSave === undefined || tokenToSave === null) {
       const existing = db.prepare("SELECT value FROM settings WHERE key = 'qatrack_token'").get();
       tokenToSave = existing ? existing.value : '';
     }
-    qatrackClient.saveConfig(baseUrl || '', tokenToSave, authType || 'Token');
-    res.json({ success: true, message: 'Settings saved successfully.' });
+    qatrackClient.saveConfig(baseUrl || '', tokenToSave, authType || 'Token', {
+      includeUnapproved,
+      includeRejected
+    });
+    res.set('Cache-Control', 'no-store, no-cache, must-revalidate, private');
+    res.json({
+      success: true,
+      message: 'Settings saved successfully.',
+      config: qatrackClient.getConfig()
+    });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -119,6 +132,18 @@ router.post('/clear-data', (req, res) => {
     res.json({ success: true, message: 'All QA measurements, test definitions, and sessions cleared successfully.' });
   } catch (err) {
     res.status(500).json({ error: err.message });
+  }
+});
+
+// 5c. Seed Demo QA Data (Explicit button action only, never run by default)
+const { seedDemoData } = require('../scripts/demo_data');
+router.post('/demo/load', (req, res) => {
+  try {
+    const { clearExisting = false } = req.body || {};
+    const result = seedDemoData(db, { clearExisting });
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
   }
 });
 
@@ -404,6 +429,14 @@ router.post('/query', async (req, res) => {
     let sessionWhereClauses = [];
     let sessionParams = [];
 
+    // Filter rejected & unapproved sessions if settings are off
+    if (!qConfig.includeRejected) {
+      sessionWhereClauses.push(`(s.status IS NULL OR LOWER(s.status) NOT LIKE '%reject%')`);
+    }
+    if (!qConfig.includeUnapproved) {
+      sessionWhereClauses.push(`(s.status IS NULL OR LOWER(s.status) NOT IN ('unapproved', 'unreviewed', 'in progress', 'pending'))`);
+    }
+
     if (units && units.length > 0) {
       const placeholders = units.map(() => '?').join(',');
       sessionWhereClauses.push(`s.unit_name IN (${placeholders})`);
@@ -513,11 +546,17 @@ router.post('/query', async (req, res) => {
     const idPlaceholders = sessionIds.map(() => '?').join(',');
 
     // Fetch all test values for these matching sessions
-    const valuesQuery = `
+    let valuesQuery = `
       SELECT session_id, test_name, value_string, value_numeric, unit, tolerance_min, tolerance_max
       FROM test_values
       WHERE session_id IN (${idPlaceholders})
     `;
+    if (!qConfig.includeRejected) {
+      valuesQuery += ` AND (status IS NULL OR LOWER(status) NOT LIKE '%reject%')`;
+    }
+    if (!qConfig.includeUnapproved) {
+      valuesQuery += ` AND (status IS NULL OR LOWER(status) NOT IN ('unapproved', 'unreviewed', 'in progress', 'pending'))`;
+    }
     const testValues = db.prepare(valuesQuery).all(...sessionIds);
 
     // Group test values by session_id
@@ -694,6 +733,57 @@ router.delete('/presets/:id', (req, res) => {
     db.prepare('DELETE FROM presets WHERE id = ?').run(req.params.id);
     res.json({ success: true });
   } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 10. Statistical Correlation Analysis (Pearson & Non-Parametric)
+const { spawn } = require('child_process');
+
+function runPythonCorrelation(payload) {
+  return new Promise((resolve, reject) => {
+    const scriptPath = path.join(__dirname, '..', 'scripts', 'correlation.py');
+    const py = spawn('python', [scriptPath], { windowsHide: true });
+
+    let stdout = '';
+    let stderr = '';
+
+    py.stdout.on('data', data => {
+      stdout += data.toString();
+    });
+
+    py.stderr.on('data', data => {
+      stderr += data.toString();
+    });
+
+    py.on('error', err => {
+      reject(err);
+    });
+
+    py.on('close', code => {
+      if (code !== 0) {
+        return reject(new Error(stderr || `Python script exited with code ${code}`));
+      }
+      try {
+        const parsed = JSON.parse(stdout);
+        resolve(parsed);
+      } catch (e) {
+        reject(new Error(`Failed to parse python output: ${e.message}`));
+      }
+    });
+
+    py.stdin.write(JSON.stringify(payload));
+    py.stdin.end();
+  });
+}
+
+router.post('/analysis/correlation', async (req, res) => {
+  try {
+    const { datasets = [], xName = 'X Variable', yName = 'Y Variable', measure = 'all' } = req.body;
+    const result = await runPythonCorrelation({ datasets, xName, yName, measure });
+    res.json(result);
+  } catch (err) {
+    console.warn('Python correlation execution warning:', err.message);
     res.status(500).json({ error: err.message });
   }
 });

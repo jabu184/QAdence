@@ -1,5 +1,5 @@
 import React from 'react';
-import { Activity, RefreshCw, Settings, Database, Bookmark, PlusCircle, Trash2, RotateCcw } from 'lucide-react';
+import { Activity, RefreshCw, Settings, Database, Bookmark, PlusCircle, Trash2, RotateCcw, Sparkles } from 'lucide-react';
 
 export default function Navbar({
   status,
@@ -12,6 +12,7 @@ export default function Navbar({
   onSync,
   onClearData,
   onNewAnalysis,
+  onLoadDemoData,
   isSyncing
 }) {
   const activePreset = presets.find(p => String(p.id) === String(selectedPreset));
@@ -181,6 +182,29 @@ export default function Navbar({
         >
           <RotateCcw size={14} color="#0284c7" />
           New Analysis
+        </button>
+
+        {/* Load Demo Data button */}
+        <button
+          onClick={onLoadDemoData}
+          title="Load sample QA dataset for demonstration & testing (Linacs, Gamma Pass Rates, Multi-variable correlation)"
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: '0.4rem',
+            padding: '0.5rem 0.85rem',
+            borderRadius: '8px',
+            border: '1px solid #cbd5e1',
+            backgroundColor: '#ffffff',
+            color: '#4338ca',
+            fontSize: '0.85rem',
+            fontWeight: '600',
+            cursor: 'pointer',
+            boxShadow: '0 1px 2px rgba(0,0,0,0.04)'
+          }}
+        >
+          <Sparkles size={14} color="#6366f1" />
+          Demo Data
         </button>
 
         {/* Fast Structure Sync (Units + Test Lists) */}

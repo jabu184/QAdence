@@ -1,6 +1,6 @@
 {
   "name": "qadence",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "QAdence - Trends & Analysis Platform for QATrack+ QA Data",
   "main": "index.js",
   "scripts": {

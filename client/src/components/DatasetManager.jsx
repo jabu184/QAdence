@@ -1,5 +1,5 @@
 import React, { useMemo } from 'react';
-import { Plus, Trash2, Copy, Eye, EyeOff, Layers, Sliders, TrendingUp, Globe, RefreshCw } from 'lucide-react';
+import { Plus, Trash2, Copy, Eye, EyeOff, Layers, Sliders, TrendingUp, Globe, RefreshCw, Sparkles } from 'lucide-react';
 import FilterControls from './FilterControls';
 import SearchableVariableSelect from './SearchableVariableSelect';
 import { groupTestsByList, getSortedGroupedTests, getUniqueTests } from '../utils/testGrouping';
@@ -25,6 +25,7 @@ export default function DatasetManager({
   onDuplicateDataset,
   onToggleDatasetVisibility,
   onSplitDatasetByFilter,
+  onSplitDatasetByUnit,
   units,
   unitClasses = [],
   tests,
@@ -46,6 +47,7 @@ export default function DatasetManager({
   onChangeTrendlineConfig,
   // On-demand data retrieval actions
   onRetrieveData,
+  onLoadDemoData,
   isLoading = false,
   totalLoadedRecords = 0,
   hasLoaded = false,
@@ -91,7 +93,8 @@ export default function DatasetManager({
     <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
       {/* 1. Global Variables & Display Options Bar */}
       <div className="card" style={{ padding: '1rem 1.25rem', background: '#ffffff' }}>
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '1rem', alignItems: 'end' }}>
+        {/* Row 1: Variable Selectors & Primary Data Retrieval Action */}
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))', gap: '1rem', alignItems: 'end' }}>
           {/* Y-Axis Variable with Search & Filter */}
           <div>
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '0.35rem' }}>
@@ -132,102 +135,6 @@ export default function DatasetManager({
               includeAllInstances={true}
               placeholder="Select comparison variable (X-Axis)..."
             />
-          </div>
-
-          {/* Display Mode (Scatter vs Connected Line vs Histogram) */}
-          <div>
-            <label style={{ fontSize: '0.78rem', fontWeight: '700', color: '#1e293b', display: 'block', marginBottom: '0.35rem' }}>
-              Plot Display Style
-            </label>
-            <div style={{ display: 'flex', borderRadius: '8px', overflow: 'hidden', border: '1px solid #cbd5e1' }}>
-              {[
-                { id: 'scatter', label: 'Scatter (Points)' },
-                { id: 'line', label: 'Line (Connected)' },
-                { id: 'distribution', label: 'Distribution' }
-              ].map(mode => {
-                const isActive = displayMode === mode.id;
-                return (
-                  <button
-                    key={mode.id}
-                    onClick={() => onChangeDisplayMode(mode.id)}
-                    style={{
-                      flex: 1,
-                      padding: '0.55rem 0.4rem',
-                      background: isActive ? '#2563eb' : '#ffffff',
-                      color: isActive ? '#ffffff' : '#64748b',
-                      fontSize: '0.78rem',
-                      fontWeight: '600',
-                      textAlign: 'center'
-                    }}
-                  >
-                    {mode.label}
-                  </button>
-                );
-              })}
-            </div>
-          </div>
-
-          {/* Trendline Modeling Controls */}
-          <div>
-            <label style={{ fontSize: '0.78rem', fontWeight: '700', color: '#1e293b', display: 'block', marginBottom: '0.35rem' }}>
-              Trendline Overlay
-            </label>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-              <label style={{
-                display: 'flex',
-                alignItems: 'center',
-                gap: '6px',
-                fontSize: '0.82rem',
-                fontWeight: '600',
-                color: trendlineConfig.enabled ? '#2563eb' : '#64748b',
-                cursor: 'pointer'
-              }}>
-                <input
-                  type="checkbox"
-                  checked={trendlineConfig.enabled}
-                  onChange={(e) => onChangeTrendlineConfig({ ...trendlineConfig, enabled: e.target.checked })}
-                />
-                Show Trend
-              </label>
-
-              {trendlineConfig.enabled && (
-                <div style={{ display: 'flex', alignItems: 'center', gap: '4px', flex: 1 }}>
-                  <select
-                    value={trendlineConfig.type}
-                    onChange={(e) => onChangeTrendlineConfig({ ...trendlineConfig, type: e.target.value })}
-                    style={{
-                      padding: '0.45rem 0.5rem',
-                      borderRadius: '6px',
-                      border: '1px solid #cbd5e1',
-                      fontSize: '0.78rem',
-                      background: '#ffffff'
-                    }}
-                  >
-                    <option value="linear">Linear Regression (y = mx + c)</option>
-                    <option value="moving_average">Moving Average (Rolling)</option>
-                  </select>
-
-                  {trendlineConfig.type === 'moving_average' && (
-                    <input
-                      type="number"
-                      min={2}
-                      max={50}
-                      title="Moving Average Window Size"
-                      value={trendlineConfig.windowSize || 5}
-                      onChange={(e) => onChangeTrendlineConfig({ ...trendlineConfig, windowSize: parseInt(e.target.value) || 5 })}
-                      style={{
-                        width: '50px',
-                        padding: '0.45rem 0.35rem',
-                        borderRadius: '6px',
-                        border: '1px solid #cbd5e1',
-                        fontSize: '0.78rem',
-                        textAlign: 'center'
-                      }}
-                    />
-                  )}
-                </div>
-              )}
-            </div>
           </div>
 
           {/* On-Demand Data Retrieval Action & Status */}
@@ -280,19 +187,204 @@ export default function DatasetManager({
                   ✓ {totalLoadedRecords} pts
                 </span>
               ) : (
-                <span style={{
-                  fontSize: '0.75rem',
-                  fontWeight: '500',
-                  color: '#64748b',
-                  background: '#f1f5f9',
-                  padding: '0.35rem 0.6rem',
-                  borderRadius: '6px',
-                  border: '1px solid #e2e8f0'
-                }}>
-                  {hasLoaded ? '0 pts found' : 'Ready to load'}
-                </span>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                  <span style={{
+                    fontSize: '0.75rem',
+                    fontWeight: '500',
+                    color: '#64748b',
+                    background: '#f1f5f9',
+                    padding: '0.35rem 0.6rem',
+                    borderRadius: '6px',
+                    border: '1px solid #e2e8f0'
+                  }}>
+                    {hasLoaded ? '0 pts found' : 'Ready to load'}
+                  </span>
+                  {onLoadDemoData && (
+                    <button
+                      type="button"
+                      onClick={onLoadDemoData}
+                      title="Load demo data for multi-linac trend and correlation exploration"
+                      style={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: '4px',
+                        fontSize: '0.75rem',
+                        fontWeight: '600',
+                        color: '#4338ca',
+                        background: '#eef2ff',
+                        padding: '0.35rem 0.6rem',
+                        borderRadius: '6px',
+                        border: '1px solid #c7d2fe',
+                        cursor: 'pointer'
+                      }}
+                    >
+                      <Sparkles size={12} color="#6366f1" /> Demo Data
+                    </button>
+                  )}
+                </div>
               )}
             </div>
+          </div>
+        </div>
+
+        {/* Row 2: Visualization Styling & Trendline Modeling Bar */}
+        <div style={{
+          display: 'flex',
+          flexWrap: 'wrap',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          gap: '1rem',
+          marginTop: '0.85rem',
+          paddingTop: '0.85rem',
+          borderTop: '1px solid #f1f5f9'
+        }}>
+          {/* Display Mode (Scatter vs Connected Line vs Histogram) */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: '0.65rem' }}>
+            <label style={{ fontSize: '0.78rem', fontWeight: '700', color: '#475569', whiteSpace: 'nowrap' }}>
+              Plot Style:
+            </label>
+            <div style={{ display: 'flex', borderRadius: '8px', overflow: 'hidden', border: '1px solid #cbd5e1' }}>
+              {[
+                { id: 'scatter', label: 'Scatter (Points)' },
+                { id: 'line', label: 'Line (Connected)' },
+                { id: 'distribution', label: 'Distribution' }
+              ].map(mode => {
+                const isActive = displayMode === mode.id;
+                return (
+                  <button
+                    key={mode.id}
+                    onClick={() => onChangeDisplayMode(mode.id)}
+                    style={{
+                      padding: '0.45rem 0.75rem',
+                      background: isActive ? '#2563eb' : '#ffffff',
+                      color: isActive ? '#ffffff' : '#64748b',
+                      fontSize: '0.78rem',
+                      fontWeight: '600',
+                      textAlign: 'center'
+                    }}
+                  >
+                    {mode.label}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* Trendline Modeling Controls */}
+          <div style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: '0.65rem',
+            background: trendlineConfig.enabled ? '#f0fdf4' : 'transparent',
+            padding: '0.35rem 0.75rem',
+            borderRadius: '8px',
+            border: trendlineConfig.enabled ? '1px solid #bbf7d0' : '1px solid #e2e8f0',
+            transition: 'all 0.15s ease'
+          }}>
+            <label style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: '6px',
+              fontSize: '0.82rem',
+              fontWeight: '700',
+              color: trendlineConfig.enabled ? '#15803d' : '#475569',
+              cursor: 'pointer',
+              whiteSpace: 'nowrap'
+            }}>
+              <input
+                type="checkbox"
+                checked={trendlineConfig.enabled}
+                onChange={(e) => onChangeTrendlineConfig({ ...trendlineConfig, enabled: e.target.checked })}
+              />
+              Show Trend
+            </label>
+
+            {trendlineConfig.enabled && (
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+                <select
+                  value={trendlineConfig.type}
+                  onChange={(e) => onChangeTrendlineConfig({ ...trendlineConfig, type: e.target.value })}
+                  style={{
+                    padding: '0.42rem 0.6rem',
+                    borderRadius: '6px',
+                    border: '1px solid #cbd5e1',
+                    fontSize: '0.78rem',
+                    fontWeight: '600',
+                    background: '#ffffff',
+                    color: '#1e293b'
+                  }}
+                >
+                  <option value="linear">Linear Regression (y = mx + c)</option>
+                  <option value="polynomial">Polynomial Regression</option>
+                  <option value="moving_average">Moving Average (Rolling)</option>
+                </select>
+
+                {trendlineConfig.type === 'polynomial' && (
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                    <label style={{ fontSize: '0.76rem', fontWeight: '600', color: '#475569', whiteSpace: 'nowrap' }}>
+                      Order:
+                    </label>
+                    <input
+                      type="number"
+                      min={2}
+                      max={6}
+                      step={1}
+                      title="Polynomial degree / order (2 to 6)"
+                      value={trendlineConfig.order || 2}
+                      onChange={(e) => {
+                        const val = parseInt(e.target.value, 10);
+                        onChangeTrendlineConfig({
+                          ...trendlineConfig,
+                          order: isNaN(val) ? 2 : Math.max(2, Math.min(6, val))
+                        });
+                      }}
+                      style={{
+                        width: '52px',
+                        padding: '0.4rem 0.35rem',
+                        borderRadius: '6px',
+                        border: '1px solid #cbd5e1',
+                        fontSize: '0.78rem',
+                        fontWeight: '700',
+                        textAlign: 'center',
+                        background: '#ffffff'
+                      }}
+                    />
+                    <span style={{ fontSize: '0.72rem', color: '#15803d', fontWeight: '600', whiteSpace: 'nowrap' }}>
+                      ({(trendlineConfig.order || 2) === 2 ? 'Quadratic' : (trendlineConfig.order === 3 ? 'Cubic' : `Deg ${trendlineConfig.order || 2}`)})
+                    </span>
+                  </div>
+                )}
+
+                {trendlineConfig.type === 'moving_average' && (
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                    <label style={{ fontSize: '0.76rem', fontWeight: '600', color: '#475569', whiteSpace: 'nowrap' }}>
+                      Window:
+                    </label>
+                    <input
+                      type="number"
+                      min={2}
+                      max={50}
+                      title="Moving Average Window Size"
+                      value={trendlineConfig.windowSize || 5}
+                      onChange={(e) => onChangeTrendlineConfig({ ...trendlineConfig, windowSize: parseInt(e.target.value, 10) || 5 })}
+                      style={{
+                        width: '52px',
+                        padding: '0.4rem 0.35rem',
+                        borderRadius: '6px',
+                        border: '1px solid #cbd5e1',
+                        fontSize: '0.78rem',
+                        fontWeight: '700',
+                        textAlign: 'center',
+                        background: '#ffffff'
+                      }}
+                    />
+                    <span style={{ fontSize: '0.72rem', color: '#64748b' }}>
+                      pts
+                    </span>
+                  </div>
+                )}
+              </div>
+            )}
           </div>
         </div>
       </div>
@@ -600,6 +692,7 @@ export default function DatasetManager({
             onChangePlotType={onChangeDisplayMode}
             isMultiDatasetMode={true}
             onSplitByFilter={(testName, values) => onSplitDatasetByFilter && onSplitDatasetByFilter(activeDataset.id, testName, values)}
+            onSplitByUnit={(targetUnits) => onSplitDatasetByUnit && onSplitDatasetByUnit(activeDataset.id, targetUnits)}
           />
         </div>
       )}

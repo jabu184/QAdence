@@ -107,6 +107,15 @@ db.exec(`
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
   );
+
+  CREATE TABLE IF NOT EXISTS test_instance_statuses (
+    id INTEGER PRIMARY KEY,
+    name TEXT NOT NULL,
+    slug TEXT,
+    requires_review INTEGER DEFAULT 0,
+    valid INTEGER DEFAULT 1,
+    is_rejected INTEGER DEFAULT 0
+  );
 `);
 
 // Safe migrations for existing databases

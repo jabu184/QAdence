@@ -26,6 +26,7 @@ export default function FilterControls({
   onRunQuery,
   isMultiDatasetMode = false,
   onSplitByFilter,
+  onSplitByUnit,
   testLists = [],
   selectedTestLists = [],
   onChangeTestLists,
@@ -198,9 +199,49 @@ export default function FilterControls({
 
           {/* 2. Units in Selected Class */}
           <div>
-            <label style={{ fontSize: '0.75rem', fontWeight: '700', color: '#64748b', textTransform: 'uppercase', display: 'block', marginBottom: '0.35rem' }}>
-              Units {selectedUnitClass !== 'All Classes' ? `(${selectedUnitClass})` : ''}
-            </label>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '0.4rem', flexWrap: 'wrap', gap: '0.5rem' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <label style={{ fontSize: '0.75rem', fontWeight: '700', color: '#64748b', textTransform: 'uppercase' }}>
+                  Units {selectedUnitClass !== 'All Classes' ? `(${selectedUnitClass})` : ''}
+                </label>
+                {selectedUnits.length > 0 && (
+                  <span style={{ fontSize: '0.72rem', color: '#2563eb', fontWeight: '600' }}>
+                    ({selectedUnits.length} selected)
+                  </span>
+                )}
+              </div>
+
+              {isMultiDatasetMode && onSplitByUnit && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    const targetUnitsToSplit = selectedUnits.length > 0
+                      ? selectedUnits
+                      : displayedUnits.map(u => u.name);
+                    onSplitByUnit(targetUnitsToSplit);
+                  }}
+                  title="Create an individual dataset for each machine unit based on currently configured settings"
+                  style={{
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: '5px',
+                    padding: '3px 10px',
+                    borderRadius: '6px',
+                    fontSize: '0.75rem',
+                    fontWeight: '700',
+                    background: '#16a34a',
+                    color: '#ffffff',
+                    border: '1px solid #15803d',
+                    cursor: 'pointer',
+                    boxShadow: '0 1px 2px rgba(22, 163, 74, 0.25)',
+                    transition: 'all 0.15s ease'
+                  }}
+                >
+                  <Layers size={13} />
+                  Split by Unit
+                </button>
+              )}
+            </div>
             <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.4rem', alignItems: 'center' }}>
               <button
                 type="button"

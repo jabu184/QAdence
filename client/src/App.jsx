@@ -54,7 +54,8 @@ export default function App() {
   const [trendlineConfig, setTrendlineConfig] = useState({
     enabled: false,
     type: 'linear',
-    windowSize: 5
+    windowSize: 5,
+    order: 2
   });
 
   // Ignored / Excluded points state
@@ -217,6 +218,64 @@ export default function App() {
     }
   };
 
+  const handleSplitDatasetByUnit = (datasetId, unitNames) => {
+    const orig = datasets.find(d => d.id === datasetId) || datasets[0];
+    if (!orig) return;
+
+    // Determine target units to split:
+    // If orig.units has 2+ units, split by those selected units;
+    // Otherwise split by unitNames provided (or all active units from metadata)
+    let targets = (orig.units && orig.units.length > 0) ? orig.units : (unitNames || []);
+    if (!targets || targets.length === 0) {
+      targets = units.filter(u => u.active !== 0).map(u => u.name);
+    }
+
+    if (targets.length <= 1) {
+      alert('Cannot split: only 1 unit is available. Please select "All Units" or multiple units to split into separate datasets.');
+      return;
+    }
+
+    // Create a new dataset for each unit based on the currently configured dataset settings
+    const generated = targets.map((uName, idx) => {
+      const color = DEFAULT_PALETTE[(datasets.length + idx) % DEFAULT_PALETTE.length];
+      const baseName = orig.name && !orig.name.startsWith('Data Set') ? `${orig.name} (${uName})` : uName;
+      return {
+        id: `ds-${Date.now()}-${idx}-${Math.random().toString(36).substring(2, 6)}`,
+        name: baseName,
+        color: color,
+        visible: true,
+        units: [uName],
+        testLists: [...(orig.testLists || [])],
+        includeAllInstances: orig.includeAllInstances !== undefined ? orig.includeAllInstances : true,
+        dateFrom: orig.dateFrom || '',
+        dateTo: orig.dateTo || '',
+        filters: [...(orig.filters || [])]
+      };
+    });
+
+    let nextDatasets = [];
+    setDatasets(prev => {
+      const targetIndex = prev.findIndex(d => d.id === datasetId);
+      const next = [...prev];
+      if (targetIndex === -1) {
+        nextDatasets = [...prev, ...generated];
+      } else {
+        next.splice(targetIndex, 1, ...generated);
+        nextDatasets = next;
+      }
+      return nextDatasets;
+    });
+
+    if (generated.length > 0) {
+      setActiveDatasetId(generated[0].id);
+    }
+
+    // If data has already been loaded, automatically run queries on the new datasets
+    if (hasLoaded) {
+      runAllQueries({ datasets: nextDatasets });
+    }
+  };
+
   const handleNewAnalysis = () => {
     if (!window.confirm('Start a new analysis? This will clear all configured datasets, custom filters, and excluded data points.')) return;
     const initialId = `ds-${Date.now()}`;
@@ -238,7 +297,7 @@ export default function App() {
     setIgnoredSessionIds([]);
     setSelectedPresetId('');
     setSelectedTestList('');
-    setTrendlineConfig({ enabled: false, type: 'linear', windowSize: 5 });
+    setTrendlineConfig({ enabled: false, type: 'linear', windowSize: 5, order: 2 });
     setIncludeAllInstances(true);
     setDisplayMode('scatter');
     setActiveTab('chart');
@@ -260,20 +319,34 @@ export default function App() {
 
   // Execute Queries for all Datasets
   const runAllQueries = useCallback(async (options = {}) => {
-    const { pullOnDemand = false } = options;
-    if (!yVariable || datasets.length === 0) return;
+    const {
+      pullOnDemand = false,
+      datasets: overrideDatasets,
+      yVariable: overrideY,
+      xVariable: overrideX,
+      selectedTestList: overrideTestList,
+      includeAllInstances: overrideIncludeAll
+    } = options;
+
+    const activeDatasets = overrideDatasets || datasets;
+    const effectiveY = overrideY || yVariable;
+    const effectiveX = overrideX !== undefined ? overrideX : xVariable;
+    const effectiveSelectedTestList = overrideTestList !== undefined ? overrideTestList : selectedTestList;
+    const effectiveIncludeAll = overrideIncludeAll !== undefined ? overrideIncludeAll : includeAllInstances;
+
+    if (!effectiveY || activeDatasets.length === 0) return;
     setIsLoading(true);
 
     try {
       const ignoredSet = new Set(ignoredSessionIds);
-      const isDateX = !xVariable || xVariable === 'work_completed';
+      const isDateX = !effectiveX || effectiveX === 'work_completed';
 
       const resultsMap = {};
 
       await Promise.all(
-        datasets.map(async ds => {
-          const effectiveTestLists = !includeAllInstances && selectedTestList
-            ? [selectedTestList]
+        activeDatasets.map(async ds => {
+          const effectiveTestLists = !effectiveIncludeAll && effectiveSelectedTestList
+            ? [effectiveSelectedTestList]
             : (ds.testLists || []);
 
           const res = await fetch('/api/query', {
@@ -282,13 +355,13 @@ export default function App() {
             body: JSON.stringify({
               units: ds.units,
               testLists: effectiveTestLists,
-              testList: !includeAllInstances ? selectedTestList : '',
-              includeAllInstances: includeAllInstances,
+              testList: !effectiveIncludeAll ? effectiveSelectedTestList : '',
+              includeAllInstances: effectiveIncludeAll,
               dateFrom: ds.dateFrom,
               dateTo: ds.dateTo,
               filters: ds.filters,
-              xVariable,
-              yVariable,
+              xVariable: effectiveX,
+              yVariable: effectiveY,
               pullOnDemand
             })
           });
@@ -315,6 +388,25 @@ export default function App() {
       );
 
       setDatasetResults(resultsMap);
+      loadedConfigRef.current = JSON.stringify({
+        xVariable: effectiveX,
+        yVariable: effectiveY,
+        selectedTestList: effectiveSelectedTestList,
+        includeAllInstances: effectiveIncludeAll,
+        datasets: activeDatasets.map(d => ({
+          id: d.id,
+          units: [...(d.units || [])].sort(),
+          dateFrom: d.dateFrom || '',
+          dateTo: d.dateTo || '',
+          filters: (d.filters || []).map(f => ({
+            testName: f.testName,
+            operator: f.operator,
+            value: f.value
+          }))
+        }))
+      });
+      setIsConfigStale(false);
+      setHasLoaded(true);
     } catch (err) {
       console.error('Multi-dataset query error:', err);
     } finally {
@@ -594,14 +686,75 @@ export default function App() {
         const data = await res.json();
         if (data.success) {
           setIgnoredSessionIds([]);
+          setDatasetResults({});
+          setHasLoaded(false);
+          setIsConfigStale(false);
           await loadMetadata();
-          runAllQueries();
         }
       } catch (err) {
         alert('Clear error: ' + err.message);
       } finally {
         setIsLoading(false);
       }
+    }
+  };
+
+  // Load Demonstration QA Dataset
+  const handleLoadDemoData = async () => {
+    if (status?.db?.sessionCount > 0) {
+      if (!window.confirm('Load sample demonstration QA dataset? This will add realistic longitudinal QA metrics and machine records to the database.')) {
+        return;
+      }
+    }
+    setIsLoading(true);
+    try {
+      const res = await fetch('/api/demo/load', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ clearExisting: false })
+      });
+      const data = await res.json();
+      if (data.success) {
+        await loadMetadata();
+        const demoDsId = `ds-${Date.now()}`;
+        const demoDatasets = [
+          {
+            id: demoDsId,
+            name: 'Demo Linacs (All)',
+            color: DEFAULT_PALETTE[0],
+            visible: true,
+            units: [],
+            testLists: [],
+            includeAllInstances: true,
+            dateFrom: '',
+            dateTo: '',
+            filters: []
+          }
+        ];
+        setDatasets(demoDatasets);
+        setActiveDatasetId(demoDsId);
+        setIgnoredSessionIds([]);
+        setYVariable('Overall Gamma (%)');
+        setXVariable('work_completed');
+        setIncludeAllInstances(true);
+        setSelectedTestList('');
+        setHasLoaded(true);
+        setIsConfigStale(false);
+
+        await runAllQueries({
+          datasets: demoDatasets,
+          yVariable: 'Overall Gamma (%)',
+          xVariable: 'work_completed',
+          includeAllInstances: true,
+          selectedTestList: ''
+        });
+      } else {
+        alert('Failed to load demo data: ' + (data.error || 'Unknown error'));
+      }
+    } catch (err) {
+      alert('Error loading demo data: ' + err.message);
+    } finally {
+      setIsLoading(false);
     }
   };
 
@@ -654,6 +807,7 @@ export default function App() {
         onSync={handleSync}
         onClearData={handleClearData}
         onNewAnalysis={handleNewAnalysis}
+        onLoadDemoData={handleLoadDemoData}
         isSyncing={isSyncing}
       />
 
@@ -669,6 +823,7 @@ export default function App() {
           onDuplicateDataset={handleDuplicateDataset}
           onToggleDatasetVisibility={handleToggleDatasetVisibility}
           onSplitDatasetByFilter={handleSplitDatasetByFilter}
+          onSplitDatasetByUnit={handleSplitDatasetByUnit}
           units={units}
           unitClasses={unitClasses}
           tests={tests}
@@ -689,6 +844,7 @@ export default function App() {
           trendlineConfig={trendlineConfig}
           onChangeTrendlineConfig={setTrendlineConfig}
           onRetrieveData={handleRetrieveOnDemand}
+          onLoadDemoData={handleLoadDemoData}
           isLoading={isLoading || isSyncing}
           totalLoadedRecords={combinedTableRows.length}
           hasLoaded={hasLoaded}

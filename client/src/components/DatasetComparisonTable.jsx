@@ -1,6 +1,8 @@
 import React, { useState, useMemo } from 'react';
 import { Download, Table, CheckCircle2, TrendingUp } from 'lucide-react';
 import BoxWhiskerPlot from './BoxWhiskerPlot';
+import CorrelationAnalysisPanel from './CorrelationAnalysisPanel';
+import { computePolynomialRegression } from '../utils/math';
 
 export default function DatasetComparisonTable({
   datasets = [],
@@ -10,7 +12,8 @@ export default function DatasetComparisonTable({
   xVariable,
   trendlineConfig
 }) {
-  const ignoredSet = new Set(ignoredSessionIds);
+  const ignoredSet = useMemo(() => new Set(ignoredSessionIds), [ignoredSessionIds]);
+  const isDateX = !xVariable || xVariable === 'work_completed';
   const [sortKey, setSortKey] = useState(null);
   const [sortOrder, setSortOrder] = useState('asc');
 
@@ -210,7 +213,13 @@ export default function DatasetComparisonTable({
               {renderHeader('range', 'Range (Δ)', 'right')}
               {trendlineConfig?.enabled && (
                 <>
-                  {renderHeader('drift', 'Trend Drift Rate', 'right')}
+                  {renderHeader(
+                    'drift',
+                    trendlineConfig.type === 'polynomial'
+                      ? `Poly Fit (d=${trendlineConfig.order || 2})`
+                      : (trendlineConfig.type === 'moving_average' ? `Moving Avg (k=${trendlineConfig.windowSize || 5})` : 'Trend Drift Rate'),
+                    'right'
+                  )}
                   {renderHeader('r2', 'R² Fit', 'right')}
                 </>
               )}
@@ -303,16 +312,38 @@ export default function DatasetComparisonTable({
                   </td>
 
                   {/* Trendline columns */}
-                  {trendlineConfig?.enabled && (
-                    <>
-                      <td style={{ padding: '10px 12px', textAlign: 'right', fontWeight: '600', color: reg ? '#d97706' : '#94a3b8' }}>
-                        {reg ? reg.formattedRate : 'N/A'}
-                      </td>
-                      <td style={{ padding: '10px 12px', textAlign: 'right', color: reg ? '#334155' : '#94a3b8' }}>
-                        {reg ? reg.r2 : 'N/A'}
-                      </td>
-                    </>
-                  )}
+                  {trendlineConfig?.enabled && (() => {
+                    let driftText = 'N/A';
+                    let r2Text = 'N/A';
+
+                    if (trendlineConfig.type === 'polynomial') {
+                      const activePts = (res?.dataPoints || []).filter(p => !ignoredSet.has(p.sessionId));
+                      const poly = computePolynomialRegression(activePts, trendlineConfig.order || 2, isDateX);
+                      if (poly) {
+                        driftText = `d=${poly.order}`;
+                        r2Text = poly.r2 !== undefined ? poly.r2 : 'N/A';
+                      }
+                    } else if (trendlineConfig.type === 'moving_average') {
+                      driftText = `k=${trendlineConfig.windowSize || 5}`;
+                      r2Text = '-';
+                    } else {
+                      if (reg) {
+                        driftText = reg.formattedRate;
+                        r2Text = reg.r2 !== undefined ? reg.r2 : 'N/A';
+                      }
+                    }
+
+                    return (
+                      <>
+                        <td style={{ padding: '10px 12px', textAlign: 'right', fontWeight: '600', color: driftText !== 'N/A' ? '#d97706' : '#94a3b8' }}>
+                          {driftText}
+                        </td>
+                        <td style={{ padding: '10px 12px', textAlign: 'right', color: r2Text !== 'N/A' && r2Text !== '-' ? '#334155' : '#94a3b8' }}>
+                          {r2Text}
+                        </td>
+                      </>
+                    );
+                  })()}
                 </tr>
               );
             })}
@@ -325,6 +356,15 @@ export default function DatasetComparisonTable({
         datasets={datasets}
         datasetResults={datasetResults}
         ignoredSessionIds={ignoredSessionIds}
+        yVariable={yVariable}
+      />
+
+      {/* Dual-Variable Statistical Correlation & Dependence Analysis */}
+      <CorrelationAnalysisPanel
+        datasets={datasets}
+        datasetResults={datasetResults}
+        ignoredSessionIds={ignoredSessionIds}
+        xVariable={xVariable}
         yVariable={yVariable}
       />
     </div>

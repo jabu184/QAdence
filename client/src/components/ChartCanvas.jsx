@@ -13,8 +13,8 @@ import {
   Filler
 } from 'chart.js';
 import { Scatter, Line, Bar } from 'react-chartjs-2';
-import { Download, EyeOff, RotateCcw, AlertCircle, TrendingUp, Activity, RefreshCw } from 'lucide-react';
-import { computeLinearRegression, computeMovingAverage } from '../utils/math';
+import { Download, EyeOff, RotateCcw, AlertCircle, Activity, RefreshCw } from 'lucide-react';
+import { computeLinearRegression, computeMovingAverage, computePolynomialRegression } from '../utils/math';
 
 ChartJS.register(
   CategoryScale,
@@ -236,6 +236,23 @@ export default function ChartCanvas({
               pointRadius: 0,
               pointHoverRadius: 0,
               showLine: true,
+              fill: false
+            });
+          }
+        } else if (trendlineConfig.type === 'polynomial') {
+          const order = trendlineConfig.order || 2;
+          const poly = computePolynomialRegression(sortedPts, order, isDateX);
+          if (poly && poly.trendPoints?.length > 0) {
+            chartDatasets.push({
+              label: `${ds.name} Poly (Order ${order}, R²=${poly.r2})`,
+              data: poly.trendPoints,
+              borderColor: ds.color || '#2563eb',
+              borderDash: [6, 4],
+              borderWidth: 2,
+              pointRadius: 0,
+              pointHoverRadius: 0,
+              showLine: true,
+              tension: 0.15,
               fill: false
             });
           }

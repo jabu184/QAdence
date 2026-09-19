@@ -5,18 +5,22 @@ export default function SettingsModal({ isOpen, onClose, onConfigSaved }) {
   const [baseUrl, setBaseUrl] = useState('');
   const [token, setToken] = useState('');
   const [authType, setAuthType] = useState('Api-Key');
+  const [includeUnapproved, setIncludeUnapproved] = useState(false);
+  const [includeRejected, setIncludeRejected] = useState(false);
   const [isTesting, setIsTesting] = useState(false);
   const [testResult, setTestResult] = useState(null);
   const [isSaving, setIsSaving] = useState(false);
 
   useEffect(() => {
     if (isOpen) {
-      fetch('/api/config')
+      fetch(`/api/config?_t=${Date.now()}`, { cache: 'no-store' })
         .then(r => r.json())
         .then(data => {
           setBaseUrl(data.baseUrl || '');
           setToken(data.token || '');
           setAuthType(data.authType || 'Token');
+          setIncludeUnapproved(data.includeUnapproved === true || data.includeUnapproved === 'true' || data.includeUnapproved === 1);
+          setIncludeRejected(data.includeRejected === true || data.includeRejected === 'true' || data.includeRejected === 1);
           setTestResult(null);
         })
         .catch(console.error);
@@ -33,7 +37,7 @@ export default function SettingsModal({ isOpen, onClose, onConfigSaved }) {
       await fetch('/api/config', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ baseUrl, token, authType })
+        body: JSON.stringify({ baseUrl, token, authType, includeUnapproved, includeRejected })
       });
 
       const res = await fetch('/api/test-connection', { method: 'POST' });
@@ -49,11 +53,21 @@ export default function SettingsModal({ isOpen, onClose, onConfigSaved }) {
   const handleSave = async () => {
     setIsSaving(true);
     try {
-      await fetch('/api/config', {
+      const res = await fetch('/api/config', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ baseUrl, token, authType })
+        body: JSON.stringify({
+          baseUrl,
+          token,
+          authType,
+          includeUnapproved,
+          includeRejected
+        })
       });
+      const data = await res.json();
+      if (!res.ok || data.success === false) {
+        throw new Error(data.error || data.message || 'Failed to save settings');
+      }
       if (onConfigSaved) onConfigSaved();
       onClose();
     } catch (e) {
@@ -191,6 +205,74 @@ export default function SettingsModal({ isOpen, onClose, onConfigSaved }) {
                 </div>
               </div>
             )}
+          </div>
+
+          {/* Data Retrieval & Ingestion Filters */}
+          <div style={{
+            marginTop: '0.65rem',
+            paddingTop: '0.9rem',
+            borderTop: '1px solid #e2e8f0',
+            display: 'flex',
+            flexDirection: 'column',
+            gap: '0.75rem'
+          }}>
+            <label style={{ fontSize: '0.8rem', fontWeight: '700', color: '#1e293b' }}>
+              Data Retrieval & Ingestion Filters
+            </label>
+
+            {/* Include Unapproved Data */}
+            <label style={{
+              display: 'flex',
+              alignItems: 'flex-start',
+              gap: '9px',
+              cursor: 'pointer',
+              background: '#f8fafc',
+              padding: '0.55rem 0.75rem',
+              borderRadius: '8px',
+              border: '1px solid #e2e8f0'
+            }}>
+              <input
+                type="checkbox"
+                checked={includeUnapproved}
+                onChange={(e) => setIncludeUnapproved(e.target.checked)}
+                style={{ marginTop: '3px', cursor: 'pointer' }}
+              />
+              <div>
+                <div style={{ fontSize: '0.82rem', fontWeight: '600', color: '#1e293b' }}>
+                  Include unapproved data (off by default)
+                </div>
+                <div style={{ fontSize: '0.73rem', color: '#64748b', marginTop: '1px' }}>
+                  When unchecked, QA sessions in progress or awaiting physicist review/approval are excluded.
+                </div>
+              </div>
+            </label>
+
+            {/* Include Rejected Data */}
+            <label style={{
+              display: 'flex',
+              alignItems: 'flex-start',
+              gap: '9px',
+              cursor: 'pointer',
+              background: '#f8fafc',
+              padding: '0.55rem 0.75rem',
+              borderRadius: '8px',
+              border: '1px solid #e2e8f0'
+            }}>
+              <input
+                type="checkbox"
+                checked={includeRejected}
+                onChange={(e) => setIncludeRejected(e.target.checked)}
+                style={{ marginTop: '3px', cursor: 'pointer' }}
+              />
+              <div>
+                <div style={{ fontSize: '0.82rem', fontWeight: '600', color: '#1e293b' }}>
+                  Include rejected data (off by default)
+                </div>
+                <div style={{ fontSize: '0.73rem', color: '#64748b', marginTop: '1px' }}>
+                  When unchecked, QA sessions or test results marked as rejected are excluded.
+                </div>
+              </div>
+            </label>
           </div>
         </div>
 

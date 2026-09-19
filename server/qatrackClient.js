@@ -52,13 +52,17 @@ class QATrackClient {
     const urlRow = getSetting.get('qatrack_url');
     const tokenRow = getSetting.get('qatrack_token');
     const authTypeRow = getSetting.get('qatrack_auth_type');
+    const unapprovedRow = getSetting.get('qatrack_include_unapproved');
+    const rejectedRow = getSetting.get('qatrack_include_rejected');
 
     this.baseUrl = (urlRow ? urlRow.value : process.env.QATRACK_URL || 'http://localhost:8000').replace(/\/+$/, '');
     this.token = tokenRow ? tokenRow.value : process.env.QATRACK_TOKEN || '';
     this.authType = authTypeRow ? authTypeRow.value : process.env.QATRACK_AUTH_TYPE || 'Api-Key';
+    this.includeUnapproved = unapprovedRow ? (unapprovedRow.value === 'true' || unapprovedRow.value === '1') : false;
+    this.includeRejected = rejectedRow ? (rejectedRow.value === 'true' || rejectedRow.value === '1') : false;
   }
 
-  saveConfig(url, token, authType = 'Api-Key') {
+  saveConfig(url, token, authType = 'Api-Key', options = {}) {
     const upsert = db.prepare(`
       INSERT INTO settings (key, value) VALUES (?, ?)
       ON CONFLICT(key) DO UPDATE SET value = excluded.value
@@ -66,7 +70,32 @@ class QATrackClient {
     upsert.run('qatrack_url', url.replace(/\/+$/, ''));
     upsert.run('qatrack_token', token);
     upsert.run('qatrack_auth_type', authType);
+    if (options.includeUnapproved !== undefined) {
+      upsert.run('qatrack_include_unapproved', options.includeUnapproved ? 'true' : 'false');
+    }
+    if (options.includeRejected !== undefined) {
+      upsert.run('qatrack_include_rejected', options.includeRejected ? 'true' : 'false');
+    }
     this.reloadConfig();
+
+    if (!this.includeRejected) {
+      try {
+        db.exec(`
+          DELETE FROM test_values WHERE LOWER(status) LIKE '%reject%';
+          DELETE FROM sessions WHERE LOWER(status) LIKE '%reject%';
+          DELETE FROM sessions WHERE id NOT IN (SELECT DISTINCT session_id FROM test_values);
+        `);
+      } catch (_) {}
+    }
+    if (!this.includeUnapproved) {
+      try {
+        db.exec(`
+          DELETE FROM sessions WHERE LOWER(status) IN ('unapproved', 'unreviewed', 'in progress', 'pending');
+          DELETE FROM sessions WHERE id NOT IN (SELECT DISTINCT session_id FROM test_values);
+        `);
+      } catch (_) {}
+    }
+
     return { success: true };
   }
 
@@ -76,7 +105,9 @@ class QATrackClient {
       baseUrl: this.baseUrl,
       token: this.token,
       hasToken: !!this.token,
-      authType: this.authType
+      authType: this.authType,
+      includeUnapproved: this.includeUnapproved,
+      includeRejected: this.includeRejected
     };
   }
 
@@ -271,7 +302,8 @@ class QATrackClient {
       testsUrl: qcEndpoints.tests || `${this.baseUrl}/api/qc/tests/`,
       unitTestInfosUrl: qcEndpoints.unittestinfos || qcEndpoints['unit-test-infos'] || `${this.baseUrl}/api/qc/unittestinfos/`,
       unitTestCollectionsUrl: qcEndpoints.unittestcollections || qcEndpoints['unit-test-collections'] || `${this.baseUrl}/api/qc/unittestcollections/`,
-      testListInstancesUrl: qcEndpoints.testlistinstances || qcEndpoints['test-list-instances'] || `${this.baseUrl}/api/qc/testlistinstances/`
+      testListInstancesUrl: qcEndpoints.testlistinstances || qcEndpoints['test-list-instances'] || `${this.baseUrl}/api/qc/testlistinstances/`,
+      testInstanceStatusesUrl: qcEndpoints.testinstancestatus || qcEndpoints['test-instance-status'] || qcEndpoints.statuses || `${this.baseUrl}/api/qc/testinstancestatus/`
     };
   }
 
@@ -285,6 +317,7 @@ class QATrackClient {
         DELETE FROM test_lists;
         DELETE FROM units;
         DELETE FROM unit_test_collections;
+        DELETE FROM test_instance_statuses;
       `);
     } else {
       // Clear stale metadata discovery tables so mock/unused definitions never linger
@@ -292,6 +325,65 @@ class QATrackClient {
         DELETE FROM test_definitions;
         DELETE FROM unit_test_collections;
       `);
+    }
+
+    // 0. Fetch Test Instance Statuses
+    this.syncStatus.stage = 'Fetching QA Test Instance Statuses...';
+    this.updateMemoryStats();
+
+    let statuses = [];
+    try {
+      if (endpoints.testInstanceStatusesUrl) {
+        statuses = await this.fetchAllPages(endpoints.testInstanceStatusesUrl);
+      }
+    } catch (e) {
+      console.warn('Could not fetch test instance statuses:', e.message);
+    }
+
+    const testInstanceStatusMap = new Map();
+    const insertStatusStmt = db.prepare(`
+      INSERT OR REPLACE INTO test_instance_statuses (id, name, slug, requires_review, valid, is_rejected)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `);
+
+    for (const s of statuses) {
+      const id = s.id || this.extractIdFromUrl(s.url);
+      const name = s.name || '';
+      const slug = s.slug || '';
+      const valid = (s.valid !== undefined) ? (s.valid ? 1 : 0) : 1;
+      const isRejected = (s.valid === false || name.toLowerCase().includes('reject') || slug.toLowerCase().includes('reject')) ? 1 : 0;
+      const requiresReview = (s.requires_review !== undefined)
+        ? (s.requires_review ? 1 : 0)
+        : (name.toLowerCase().includes('unreviewed') || name.toLowerCase().includes('unapproved') || slug.toLowerCase().includes('unreviewed') ? 1 : 0);
+
+      if (id) {
+        try {
+          insertStatusStmt.run(id, name, slug, requiresReview, valid, isRejected);
+        } catch (_) {}
+      }
+
+      const statusObj = {
+        id,
+        name,
+        slug,
+        valid: Boolean(valid),
+        isRejected: Boolean(isRejected),
+        requiresReview: Boolean(requiresReview)
+      };
+
+      if (id) {
+        testInstanceStatusMap.set(id, statusObj);
+        testInstanceStatusMap.set(String(id), statusObj);
+      }
+      if (s.url) {
+        testInstanceStatusMap.set(s.url, statusObj);
+        testInstanceStatusMap.set(s.url.replace(/\/$/, ''), statusObj);
+        const relUrl = s.url.replace(/^https?:\/\/[^\/]+/, '');
+        testInstanceStatusMap.set(relUrl, statusObj);
+        testInstanceStatusMap.set(relUrl.replace(/\/$/, ''), statusObj);
+      }
+      if (name) testInstanceStatusMap.set(name.toLowerCase().trim(), statusObj);
+      if (slug) testInstanceStatusMap.set(slug.toLowerCase().trim(), statusObj);
     }
 
     // 1. Fetch Unit Classes & Unit Types
@@ -608,7 +700,142 @@ class QATrackClient {
       }
     }
 
-    return { unitClassMap, unitTypeMap, unitMap, testListMap, testDefMap, utiMap, utcMap };
+    return { unitClassMap, unitTypeMap, unitMap, testListMap, testDefMap, utiMap, utcMap, testInstanceStatusMap };
+  }
+
+  async getOrLoadTestInstanceStatusMap(endpoints = null) {
+    if (this.cachedMetadata?.testInstanceStatusMap && this.cachedMetadata.testInstanceStatusMap.size > 0) {
+      return this.cachedMetadata.testInstanceStatusMap;
+    }
+
+    const testInstanceStatusMap = new Map();
+
+    // 1. Try loading from SQLite
+    try {
+      const dbStatuses = db.prepare('SELECT id, name, slug, requires_review, valid, is_rejected FROM test_instance_statuses').all();
+      for (const s of dbStatuses) {
+        const statusObj = {
+          id: s.id,
+          name: s.name,
+          slug: s.slug,
+          valid: Boolean(s.valid),
+          isRejected: Boolean(s.is_rejected),
+          requiresReview: Boolean(s.requires_review)
+        };
+        testInstanceStatusMap.set(s.id, statusObj);
+        testInstanceStatusMap.set(String(s.id), statusObj);
+        testInstanceStatusMap.set(`${this.baseUrl}/api/qc/testinstancestatus/${s.id}/`, statusObj);
+        testInstanceStatusMap.set(`${this.baseUrl}/api/qc/testinstancestatus/${s.id}`, statusObj);
+        testInstanceStatusMap.set(`/api/qc/testinstancestatus/${s.id}/`, statusObj);
+        testInstanceStatusMap.set(`/api/qc/testinstancestatus/${s.id}`, statusObj);
+        if (s.name) testInstanceStatusMap.set(s.name.toLowerCase().trim(), statusObj);
+        if (s.slug) testInstanceStatusMap.set(s.slug.toLowerCase().trim(), statusObj);
+      }
+    } catch (_) {}
+
+    // 2. If empty and endpoints provided, fetch from QATrack+ API
+    if (testInstanceStatusMap.size === 0 && (endpoints?.testInstanceStatusesUrl || this.baseUrl)) {
+      try {
+        const statusesUrl = endpoints?.testInstanceStatusesUrl || `${this.baseUrl}/api/qc/testinstancestatus/`;
+        const statuses = await this.fetchAllPages(statusesUrl);
+        const insertStatusStmt = db.prepare(`
+          INSERT OR REPLACE INTO test_instance_statuses (id, name, slug, requires_review, valid, is_rejected)
+          VALUES (?, ?, ?, ?, ?, ?)
+        `);
+
+        for (const s of statuses) {
+          const id = s.id || this.extractIdFromUrl(s.url);
+          const name = s.name || '';
+          const slug = s.slug || '';
+          const valid = (s.valid !== undefined) ? (s.valid ? 1 : 0) : 1;
+          const isRejected = (s.valid === false || name.toLowerCase().includes('reject') || slug.toLowerCase().includes('reject')) ? 1 : 0;
+          const requiresReview = (s.requires_review !== undefined)
+            ? (s.requires_review ? 1 : 0)
+            : (name.toLowerCase().includes('unreviewed') || name.toLowerCase().includes('unapproved') || slug.toLowerCase().includes('unreviewed') ? 1 : 0);
+
+          if (id) {
+            try {
+              insertStatusStmt.run(id, name, slug, requiresReview, valid, isRejected);
+            } catch (_) {}
+          }
+
+          const statusObj = {
+            id,
+            name,
+            slug,
+            valid: Boolean(valid),
+            isRejected: Boolean(isRejected),
+            requiresReview: Boolean(requiresReview)
+          };
+
+          if (id) {
+            testInstanceStatusMap.set(id, statusObj);
+            testInstanceStatusMap.set(String(id), statusObj);
+          }
+          if (s.url) {
+            testInstanceStatusMap.set(s.url, statusObj);
+            testInstanceStatusMap.set(s.url.replace(/\/$/, ''), statusObj);
+            const relUrl = s.url.replace(/^https?:\/\/[^\/]+/, '');
+            testInstanceStatusMap.set(relUrl, statusObj);
+            testInstanceStatusMap.set(relUrl.replace(/\/$/, ''), statusObj);
+          }
+          if (name) testInstanceStatusMap.set(name.toLowerCase().trim(), statusObj);
+          if (slug) testInstanceStatusMap.set(slug.toLowerCase().trim(), statusObj);
+        }
+      } catch (err) {
+        console.warn('Could not fetch test instance statuses from API:', err.message);
+      }
+    }
+
+    return testInstanceStatusMap;
+  }
+
+  resolveTestInstanceStatus(ti, statusMap) {
+    if (!ti) return { name: 'Approved', slug: 'approved', valid: true, isRejected: false, requiresReview: false };
+
+    let statusObj = null;
+    if (ti.status && typeof ti.status === 'object') {
+      statusObj = ti.status;
+    } else if (ti.status && statusMap) {
+      statusObj = statusMap.get(ti.status) ||
+                  statusMap.get(this.extractIdFromUrl(ti.status)) ||
+                  statusMap.get(String(ti.status));
+      if (!statusObj && typeof ti.status === 'string') {
+        const norm = ti.status.replace(/\/$/, '');
+        statusObj = statusMap.get(norm);
+      }
+    } else if (ti.status_name && statusMap) {
+      statusObj = statusMap.get(ti.status_name.toLowerCase().trim()) || statusMap.get(ti.status_name);
+    }
+
+    const name = statusObj?.name || ti.status_name || (typeof ti.status === 'string' && !ti.status.startsWith('http') ? ti.status : '');
+    const slug = statusObj?.slug || '';
+    const passFail = (ti.pass_fail || '').toLowerCase();
+
+    const isRejected = Boolean(
+      (statusObj && statusObj.isRejected) ||
+      (statusObj && statusObj.valid === false) ||
+      name.toLowerCase().includes('reject') ||
+      slug.toLowerCase().includes('reject') ||
+      (typeof ti.status === 'string' && ti.status.toLowerCase().includes('reject')) ||
+      passFail.includes('reject')
+    );
+
+    const requiresReview = Boolean(
+      (statusObj && statusObj.requiresReview) ||
+      name.toLowerCase().includes('unreviewed') ||
+      name.toLowerCase().includes('unapproved') ||
+      slug.toLowerCase().includes('unreviewed') ||
+      slug.toLowerCase().includes('unapproved')
+    );
+
+    return {
+      name: name || (isRejected ? 'Rejected' : (requiresReview ? 'Unreviewed' : 'Approved')),
+      slug,
+      valid: statusObj ? Boolean(statusObj.valid) : !isRejected,
+      isRejected,
+      requiresReview
+    };
   }
 
   async syncMetadata(options = {}) {
@@ -655,6 +882,8 @@ class QATrackClient {
     this.reloadConfig();
     const startTime = Date.now();
     const { testListName, testListNames, unitName, unitNames, dateFrom, dateTo, limit = 5000 } = options;
+    const effectiveIncludeUnapproved = options.includeUnapproved !== undefined ? Boolean(options.includeUnapproved) : this.includeUnapproved;
+    const effectiveIncludeRejected = options.includeRejected !== undefined ? Boolean(options.includeRejected) : this.includeRejected;
     const targetLists = (Array.isArray(testListNames) ? testListNames : (testListName ? [testListName] : [])).filter(Boolean);
     const targetUnits = (Array.isArray(unitNames) ? unitNames : (unitName ? [unitName] : [])).filter(Boolean);
 
@@ -725,6 +954,7 @@ class QATrackClient {
         }
       }
 
+      const testInstanceStatusMap = await this.getOrLoadTestInstanceStatusMap(endpoints);
       const activeUnitRows = db.prepare('SELECT id, name FROM units WHERE active = 1').all();
       const activeUnitNames = new Set(activeUnitRows.map(u => u.name.toLowerCase().trim()));
 
@@ -747,12 +977,74 @@ class QATrackClient {
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
       `);
 
+      const fetchedQATrackIds = new Set();
       let syncedCount = 0;
 
       const processBatch = db.transaction((instBatch, directColInfo = null) => {
         for (const inst of instBatch) {
           const qatrackId = inst.id || this.extractIdFromUrl(inst.url);
           if (!qatrackId) continue;
+
+          // Inspect all test instances within this session
+          const rawTestInstances = Array.isArray(inst.test_instances) ? inst.test_instances : [];
+          let hasRejectedTi = false;
+          let allRejectedTi = false;
+          let hasUnreviewedTi = false;
+          let allUnreviewedTi = false;
+
+          if (rawTestInstances.length > 0) {
+            let rejCount = 0;
+            let unrevCount = 0;
+            for (const ti of rawTestInstances) {
+              const tiStatusInfo = this.resolveTestInstanceStatus(ti, testInstanceStatusMap);
+              if (tiStatusInfo.isRejected) rejCount++;
+              if (tiStatusInfo.requiresReview) unrevCount++;
+            }
+            if (rejCount === rawTestInstances.length) allRejectedTi = true;
+            if (rejCount > 0) hasRejectedTi = true;
+            if (unrevCount === rawTestInstances.length) allUnreviewedTi = true;
+            if (unrevCount > 0) hasUnreviewedTi = true;
+          }
+
+          // Determine session status
+          let sessionStatus = 'Completed';
+          if (inst.status_name) {
+            sessionStatus = inst.status_name;
+          } else if (typeof inst.status === 'string' && inst.status.trim() && !inst.status.startsWith('http')) {
+            sessionStatus = inst.status.trim();
+          } else if (allRejectedTi || hasRejectedTi) {
+            sessionStatus = 'Rejected';
+          } else if (inst.in_progress) {
+            sessionStatus = 'In Progress';
+          } else if (inst.all_reviewed === false || hasUnreviewedTi) {
+            sessionStatus = 'Unapproved';
+          } else if (inst.all_reviewed) {
+            sessionStatus = 'Approved';
+          } else {
+            sessionStatus = 'Unapproved';
+          }
+
+          const statusLower = sessionStatus.toLowerCase();
+
+          // Filter unapproved data if setting is OFF (off by default)
+          if (!effectiveIncludeUnapproved) {
+            if (inst.in_progress || inst.all_reviewed === false || hasUnreviewedTi) {
+              continue;
+            }
+            if (statusLower.includes('unapproved') || statusLower.includes('unreviewed') || statusLower.includes('in progress') || statusLower.includes('pending')) {
+              continue;
+            }
+          }
+
+          // Filter rejected data if setting is OFF (off by default)
+          if (!effectiveIncludeRejected) {
+            if (statusLower.includes('reject') || hasRejectedTi || allRejectedTi) {
+              continue;
+            }
+          }
+
+          fetchedQATrackIds.add(qatrackId);
+          fetchedQATrackIds.add(Number(qatrackId));
 
           let uName = directColInfo?.unitName || 'Unknown Machine';
           let tListName = directColInfo?.testListName || 'Patient Specific QA';
@@ -814,15 +1106,25 @@ class QATrackClient {
             tListName,
             dateStr,
             createdBy,
-            inst.all_reviewed ? 'Reviewed' : (inst.in_progress ? 'In Progress' : 'Completed'),
+            sessionStatus,
             inst.comments && inst.comments.length > 0 ? JSON.stringify(inst.comments) : ''
           );
 
           const sess = getSessionByQATrackId.get(qatrackId);
-          if (sess && Array.isArray(inst.test_instances)) {
+          if (sess && rawTestInstances.length > 0) {
             deleteOldValues.run(sess.id);
+            let validTiCount = 0;
 
-            for (const ti of inst.test_instances) {
+            for (const ti of rawTestInstances) {
+              const tiStatusInfo = this.resolveTestInstanceStatus(ti, testInstanceStatusMap);
+
+              if (!effectiveIncludeRejected && tiStatusInfo.isRejected) {
+                continue;
+              }
+              if (!effectiveIncludeUnapproved && tiStatusInfo.requiresReview) {
+                continue;
+              }
+
               const utiInfo = utiMap.get(ti.unit_test_info) || (ti.unit_test_info && utiMap.get(this.extractIdFromUrl(ti.unit_test_info)));
               const testName = utiInfo?.testName || ti.name || ti.test_name || 'Test';
               const testSlug = utiInfo?.testSlug || ti.slug || ti.test_slug || '';
@@ -858,8 +1160,15 @@ class QATrackClient {
                 utiInfo?.unit || ti.unit || '',
                 null,
                 null,
-                ti.pass_fail || 'OK'
+                tiStatusInfo.isRejected ? 'Rejected' : (tiStatusInfo.requiresReview ? 'Unreviewed' : (ti.pass_fail || 'OK'))
               );
+              validTiCount++;
+            }
+
+            if (validTiCount === 0) {
+              deleteOldValues.run(sess.id);
+              db.prepare('DELETE FROM sessions WHERE id = ?').run(sess.id);
+              continue;
             }
           }
           syncedCount++;
@@ -1048,6 +1357,50 @@ class QATrackClient {
         }
       }
 
+      // Reconcile deleted sessions: remove any local sessions in the queried scope that were deleted in QATrack+
+      let deletedSessionsCount = 0;
+      if (!this.syncStatus.isCancelled) {
+        try {
+          let selectSql = 'SELECT id, qatrack_instance_id FROM sessions WHERE qatrack_instance_id IS NOT NULL';
+          const selectParams = [];
+          if (targetListsLower.length > 0) {
+            selectSql += ` AND LOWER(test_list_name) IN (${targetListsLower.map(() => '?').join(',')})`;
+            selectParams.push(...targetListsLower);
+          }
+          if (targetUnitsLower.length > 0) {
+            selectSql += ` AND LOWER(unit_name) IN (${targetUnitsLower.map(() => '?').join(',')})`;
+            selectParams.push(...targetUnitsLower);
+          }
+          if (dateFrom) {
+            selectSql += ' AND work_completed >= ?';
+            selectParams.push(dateFrom);
+          }
+          if (dateTo) {
+            selectSql += ' AND work_completed <= ?';
+            selectParams.push(dateTo);
+          }
+          const existingSessions = db.prepare(selectSql).all(...selectParams);
+          const toDeleteIds = existingSessions
+            .filter(s => !fetchedQATrackIds.has(s.qatrack_instance_id) && !fetchedQATrackIds.has(Number(s.qatrack_instance_id)))
+            .map(s => s.id);
+
+          if (toDeleteIds.length > 0) {
+            const deleteSessionStmt = db.prepare('DELETE FROM sessions WHERE id = ?');
+            const deleteValuesStmt = db.prepare('DELETE FROM test_values WHERE session_id = ?');
+            const deleteTx = db.transaction((ids) => {
+              for (const id of ids) {
+                deleteValuesStmt.run(id);
+                deleteSessionStmt.run(id);
+              }
+            });
+            deleteTx(toDeleteIds);
+            deletedSessionsCount = toDeleteIds.length;
+          }
+        } catch (recErr) {
+          console.warn('Warning: Session reconciliation error:', recErr.message);
+        }
+      }
+
       let totalMatchingInDb = 0;
       try {
         let countSql = 'SELECT COUNT(*) as count FROM sessions WHERE 1=1';
@@ -1111,6 +1464,8 @@ class QATrackClient {
 
     this.reloadConfig();
     const startTime = Date.now();
+    const effectiveIncludeUnapproved = options.includeUnapproved !== undefined ? Boolean(options.includeUnapproved) : this.includeUnapproved;
+    const effectiveIncludeRejected = options.includeRejected !== undefined ? Boolean(options.includeRejected) : this.includeRejected;
 
     this.syncStatus = {
       isRunning: true,
@@ -1128,7 +1483,7 @@ class QATrackClient {
     try {
       const endpoints = await this.discoverEndpoints();
       const meta = await this.fetchMetadata(endpoints, options.clearExisting);
-      const { unitMap, testListMap, utiMap, utcMap } = meta;
+      const { unitMap, testListMap, utiMap, utcMap, testInstanceStatusMap } = meta;
 
       // 7. Test List Instances (Sessions) - Streaming page-by-page database insert
       const insertSession = db.prepare(`
@@ -1150,6 +1505,7 @@ class QATrackClient {
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
       `);
 
+      const fetchedQATrackIds = new Set();
       let syncedCount = 0;
       const activeUnitsRows = db.prepare('SELECT id, name FROM units WHERE active = 1').all();
       const activeUnitNames = new Set(activeUnitsRows.map(u => u.name.toLowerCase().trim()));
@@ -1158,6 +1514,67 @@ class QATrackClient {
         for (const inst of instBatch) {
           const qatrackId = inst.id || this.extractIdFromUrl(inst.url);
           if (!qatrackId) continue;
+
+          // Inspect all test instances within this session
+          const rawTestInstances = Array.isArray(inst.test_instances) ? inst.test_instances : [];
+          let hasRejectedTi = false;
+          let allRejectedTi = false;
+          let hasUnreviewedTi = false;
+          let allUnreviewedTi = false;
+
+          if (rawTestInstances.length > 0) {
+            let rejCount = 0;
+            let unrevCount = 0;
+            for (const ti of rawTestInstances) {
+              const tiStatusInfo = this.resolveTestInstanceStatus(ti, testInstanceStatusMap);
+              if (tiStatusInfo.isRejected) rejCount++;
+              if (tiStatusInfo.requiresReview) unrevCount++;
+            }
+            if (rejCount === rawTestInstances.length) allRejectedTi = true;
+            if (rejCount > 0) hasRejectedTi = true;
+            if (unrevCount === rawTestInstances.length) allUnreviewedTi = true;
+            if (unrevCount > 0) hasUnreviewedTi = true;
+          }
+
+          // Determine session status
+          let sessionStatus = 'Completed';
+          if (inst.status_name) {
+            sessionStatus = inst.status_name;
+          } else if (typeof inst.status === 'string' && inst.status.trim() && !inst.status.startsWith('http')) {
+            sessionStatus = inst.status.trim();
+          } else if (allRejectedTi || hasRejectedTi) {
+            sessionStatus = 'Rejected';
+          } else if (inst.in_progress) {
+            sessionStatus = 'In Progress';
+          } else if (inst.all_reviewed === false || hasUnreviewedTi) {
+            sessionStatus = 'Unapproved';
+          } else if (inst.all_reviewed) {
+            sessionStatus = 'Approved';
+          } else {
+            sessionStatus = 'Unapproved';
+          }
+
+          const statusLower = sessionStatus.toLowerCase();
+
+          // Filter unapproved data if setting is OFF (off by default)
+          if (!effectiveIncludeUnapproved) {
+            if (inst.in_progress || inst.all_reviewed === false || hasUnreviewedTi) {
+              continue;
+            }
+            if (statusLower.includes('unapproved') || statusLower.includes('unreviewed') || statusLower.includes('in progress') || statusLower.includes('pending')) {
+              continue;
+            }
+          }
+
+          // Filter rejected data if setting is OFF (off by default)
+          if (!effectiveIncludeRejected) {
+            if (statusLower.includes('reject') || hasRejectedTi || allRejectedTi) {
+              continue;
+            }
+          }
+
+          fetchedQATrackIds.add(qatrackId);
+          fetchedQATrackIds.add(Number(qatrackId));
 
           let unitName = 'Unknown Machine';
           const utcKey = inst.unit_test_collection !== undefined && inst.unit_test_collection !== null
@@ -1198,15 +1615,25 @@ class QATrackClient {
             testListName,
             dateStr,
             createdBy,
-            inst.all_reviewed ? 'Reviewed' : (inst.in_progress ? 'In Progress' : 'Completed'),
+            sessionStatus,
             inst.comments && inst.comments.length > 0 ? JSON.stringify(inst.comments) : ''
           );
 
           const sess = getSessionByQATrackId.get(qatrackId);
-          if (sess && Array.isArray(inst.test_instances)) {
+          if (sess && rawTestInstances.length > 0) {
             deleteOldValues.run(sess.id);
+            let validTiCount = 0;
 
-            for (const ti of inst.test_instances) {
+            for (const ti of rawTestInstances) {
+              const tiStatusInfo = this.resolveTestInstanceStatus(ti, testInstanceStatusMap);
+
+              if (!effectiveIncludeRejected && tiStatusInfo.isRejected) {
+                continue;
+              }
+              if (!effectiveIncludeUnapproved && tiStatusInfo.requiresReview) {
+                continue;
+              }
+
               const utiInfo = utiMap.get(ti.unit_test_info) || (ti.unit_test_info && utiMap.get(this.extractIdFromUrl(ti.unit_test_info)));
               const testName = utiInfo?.testName || ti.name || ti.test_name || 'Test';
               const testSlug = utiInfo?.testSlug || ti.slug || ti.test_slug || '';
@@ -1242,8 +1669,15 @@ class QATrackClient {
                 utiInfo?.unit || ti.unit || '',
                 null,
                 null,
-                ti.pass_fail || 'OK'
+                tiStatusInfo.isRejected ? 'Rejected' : (tiStatusInfo.requiresReview ? 'Unreviewed' : (ti.pass_fail || 'OK'))
               );
+              validTiCount++;
+            }
+
+            if (validTiCount === 0) {
+              deleteOldValues.run(sess.id);
+              db.prepare('DELETE FROM sessions WHERE id = ?').run(sess.id);
+              continue;
             }
           }
           syncedCount++;
@@ -1260,6 +1694,32 @@ class QATrackClient {
           this.updateMemoryStats();
         }
       });
+
+      // Reconcile deleted sessions on full sync: remove any local sessions that are no longer returned by QATrack+
+      let deletedSessionsCount = 0;
+      if (!this.syncStatus.isCancelled) {
+        try {
+          const allDbSessions = db.prepare('SELECT id, qatrack_instance_id FROM sessions WHERE qatrack_instance_id IS NOT NULL').all();
+          const toDeleteIds = allDbSessions
+            .filter(s => !fetchedQATrackIds.has(s.qatrack_instance_id) && !fetchedQATrackIds.has(Number(s.qatrack_instance_id)))
+            .map(s => s.id);
+
+          if (toDeleteIds.length > 0) {
+            const deleteSessionStmt = db.prepare('DELETE FROM sessions WHERE id = ?');
+            const deleteValuesStmt = db.prepare('DELETE FROM test_values WHERE session_id = ?');
+            const deleteTx = db.transaction((ids) => {
+              for (const id of ids) {
+                deleteValuesStmt.run(id);
+                deleteSessionStmt.run(id);
+              }
+            });
+            deleteTx(toDeleteIds);
+            deletedSessionsCount = toDeleteIds.length;
+          }
+        } catch (recErr) {
+          console.warn('Warning: Full sync session reconciliation error:', recErr.message);
+        }
+      }
 
       const isCancelled = this.syncStatus.isCancelled;
       this.syncStatus.stage = isCancelled ? 'Sync cancelled by user.' : 'Sync completed successfully.';

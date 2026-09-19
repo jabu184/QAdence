@@ -8,10 +8,12 @@ app.use(express.json());
 app.use('/api', apiRouter);
 
 const server = app.listen(5099, async () => {
+  let originalSettings = [];
   try {
     const axios = require('axios');
     const base = 'http://localhost:5099/api';
     const db = require('./db');
+    originalSettings = db.prepare('SELECT * FROM settings').all();
     db.exec(`
       DELETE FROM test_values;
       DELETE FROM sessions;
@@ -165,6 +167,159 @@ const server = app.listen(5099, async () => {
     }
     console.log('Preset CRUD verified successfully!');
 
+    console.log('Testing /api/analysis/correlation with Python backend...');
+    const corrRes = await axios.post(`${base}/analysis/correlation`, {
+      datasets: [
+        {
+          id: 'ds-test',
+          name: 'TrueBeam 1',
+          color: '#2563eb',
+          points: [
+            { x: 10, y: 100 },
+            { x: 20, y: 200 },
+            { x: 30, y: 300 },
+            { x: 40, y: 400 }
+          ]
+        }
+      ],
+      xName: 'Nominal Dose',
+      yName: 'Measured Charge'
+    });
+
+    if (!corrRes.data.success || !corrRes.data.datasets || corrRes.data.datasets.length === 0) {
+      throw new Error('Correlation analysis failed to return datasets');
+    }
+    const dsCorr = corrRes.data.datasets[0];
+    if (dsCorr.pearsonR !== 1.0) {
+      throw new Error(`Expected Pearson r = 1.0, got ${dsCorr.pearsonR}`);
+    }
+    if (!dsCorr.suggestedType.includes('Linear')) {
+      throw new Error(`Expected Linear suggested type, got ${dsCorr.suggestedType}`);
+    }
+    console.log('Correlation verified: Pearson r =', dsCorr.pearsonR, ', suggested =', dsCorr.suggestedType);
+
+    console.log('Testing Session Deletion Reconciliation...');
+    // Insert dummy session that will simulate being deleted in QATrack+
+    const sDel = db.prepare(`
+      INSERT INTO sessions (qatrack_instance_id, unit_id, unit_name, test_list_name, work_completed, created_by, status)
+      VALUES (99999, 1, 'TrueBeam 1', 'Patient Specific QA', '2026-01-03 10:00:00', 'Physicist', 'Pass')
+    `).run().lastInsertRowid;
+    db.prepare(`INSERT INTO test_values (session_id, test_name, value_numeric) VALUES (?, 'Gamma Pass Rate (3%/3mm)', 95.0)`).run(sDel);
+
+    // Verify it exists in DB
+    const beforeCheck = db.prepare('SELECT id FROM sessions WHERE qatrack_instance_id = 99999').get();
+    if (!beforeCheck) throw new Error('Failed to insert test session for deletion test');
+
+    // Simulate reconciliation: fetched IDs contains only [1], so 99999 must be deleted
+    const fetchedIds = new Set([1]);
+    const scopeSessions = db.prepare(`SELECT id, qatrack_instance_id FROM sessions WHERE qatrack_instance_id IS NOT NULL AND test_list_name = 'Patient Specific QA'`).all();
+    const staleIds = scopeSessions.filter(s => !fetchedIds.has(s.qatrack_instance_id)).map(s => s.id);
+    for (const id of staleIds) {
+      db.prepare('DELETE FROM test_values WHERE session_id = ?').run(id);
+      db.prepare('DELETE FROM sessions WHERE id = ?').run(id);
+    }
+
+    const afterCheck = db.prepare('SELECT id FROM sessions WHERE qatrack_instance_id = 99999').get();
+    const valuesCheck = db.prepare('SELECT id FROM test_values WHERE session_id = ?').get(sDel);
+    if (afterCheck || valuesCheck) {
+      throw new Error('Reconciliation failed to prune deleted session or its values');
+    }
+    console.log('Testing /api/config for includeUnapproved and includeRejected settings...');
+    db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('qatrack_include_unapproved', 'false'), ('qatrack_include_rejected', 'false')").run();
+    require('./qatrackClient').reloadConfig();
+    const initialConfigRes = await axios.get(`${base}/config`);
+    if (initialConfigRes.data.includeUnapproved !== false || initialConfigRes.data.includeRejected !== false) {
+      throw new Error(`Expected default includeUnapproved=false and includeRejected=false, got unapproved=${initialConfigRes.data.includeUnapproved}, rejected=${initialConfigRes.data.includeRejected}`);
+    }
+
+    // Save with both enabled
+    await axios.post(`${base}/config`, {
+      baseUrl: 'http://localhost:8000',
+      token: 'test-token-123',
+      authType: 'Api-Key',
+      includeUnapproved: true,
+      includeRejected: true
+    });
+
+    const updatedConfigRes = await axios.get(`${base}/config`);
+    if (updatedConfigRes.data.includeUnapproved !== true || updatedConfigRes.data.includeRejected !== true) {
+      throw new Error('Failed to save and persist includeUnapproved=true and includeRejected=true');
+    }
+
+    // Revert back to off (default)
+    await axios.post(`${base}/config`, {
+      baseUrl: 'http://localhost:8000',
+      token: 'test-token-123',
+      authType: 'Api-Key',
+      includeUnapproved: false,
+      includeRejected: false
+    });
+
+    const revertedConfigRes = await axios.get(`${base}/config`);
+    if (revertedConfigRes.data.includeUnapproved !== false || revertedConfigRes.data.includeRejected !== false) {
+      throw new Error('Failed to revert includeUnapproved and includeRejected back to false');
+    }
+    console.log('Verified: Settings correctly persist and toggle includeUnapproved and includeRejected (off by default)!');
+
+    const qatrackClient = require('./qatrackClient');
+    qatrackClient.saveConfig('http://localhost:8000', 'test', 'Api-Key', {
+      includeUnapproved: false,
+      includeRejected: false
+    });
+    if (qatrackClient.includeUnapproved !== false || qatrackClient.includeRejected !== false) {
+      throw new Error('QATrackClient failed to set includeUnapproved and includeRejected');
+    }
+
+    console.log('Testing Test Instance Status Resolution & Strict Rejection Filtering...');
+    // Seed status 3 (Rejected), 1 (Unreviewed), 2 (Approved) in test_instance_statuses table
+    db.prepare(`INSERT OR REPLACE INTO test_instance_statuses (id, name, slug, requires_review, valid, is_rejected) VALUES (1, 'Unreviewed', 'unreviewed', 1, 1, 0)`).run();
+    db.prepare(`INSERT OR REPLACE INTO test_instance_statuses (id, name, slug, requires_review, valid, is_rejected) VALUES (2, 'Approved', 'Approved', 0, 1, 0)`).run();
+    db.prepare(`INSERT OR REPLACE INTO test_instance_statuses (id, name, slug, requires_review, valid, is_rejected) VALUES (3, 'Rejected', 'rejected', 0, 0, 1)`).run();
+
+    const statusMap = await qatrackClient.getOrLoadTestInstanceStatusMap();
+    const resolvedRejectedUrl = qatrackClient.resolveTestInstanceStatus({ status: 'http://192.168.68.113:8000/api/qc/testinstancestatus/3/', pass_fail: 'no_tol' }, statusMap);
+    if (!resolvedRejectedUrl.isRejected || resolvedRejectedUrl.valid) {
+      throw new Error(`Expected isRejected=true and valid=false for status URL /3/, got ${JSON.stringify(resolvedRejectedUrl)}`);
+    }
+
+    const resolvedRejectedId = qatrackClient.resolveTestInstanceStatus({ status: 3, pass_fail: 'no_tol' }, statusMap);
+    if (!resolvedRejectedId.isRejected) {
+      throw new Error(`Expected isRejected=true for status ID 3, got ${JSON.stringify(resolvedRejectedId)}`);
+    }
+
+    const resolvedUnreviewed = qatrackClient.resolveTestInstanceStatus({ status: 'http://192.168.68.113:8000/api/qc/testinstancestatus/1/', pass_fail: 'no_tol' }, statusMap);
+    if (!resolvedUnreviewed.requiresReview) {
+      throw new Error(`Expected requiresReview=true for status URL /1/, got ${JSON.stringify(resolvedUnreviewed)}`);
+    }
+
+    const resolvedApproved = qatrackClient.resolveTestInstanceStatus({ status: 'http://192.168.68.113:8000/api/qc/testinstancestatus/2/', pass_fail: 'no_tol' }, statusMap);
+    if (resolvedApproved.isRejected || resolvedApproved.requiresReview) {
+      throw new Error(`Expected clean approved status for URL /2/, got ${JSON.stringify(resolvedApproved)}`);
+    }
+    console.log('Verified: resolveTestInstanceStatus correctly maps URLs and IDs to rejection & review flags!');
+
+    // Test /api/query defense-in-depth: rejected session must be excluded when includeRejected is false
+    const sRej = db.prepare(`
+      INSERT INTO sessions (qatrack_instance_id, unit_id, unit_name, test_list_name, work_completed, created_by, status)
+      VALUES (88888, 1, 'LA10', 'Patient Specific QA', '2026-01-04 10:00:00', 'Physicist', 'Rejected')
+    `).run().lastInsertRowid;
+    db.prepare(`INSERT INTO test_values (session_id, test_name, value_numeric, status) VALUES (?, 'Gamma Pass Rate (3%/3mm)', 82.0, 'Rejected')`).run(sRej);
+
+    const queryResFiltered = await axios.post(`${base}/query`, {
+      units: ['LA10'],
+      includeAllInstances: true,
+      yVariable: 'Gamma Pass Rate (3%/3mm)'
+    });
+    const rejPoint = (queryResFiltered.data.dataPoints || []).find(p => p.sessionId === sRej);
+    if (rejPoint) {
+      throw new Error('Expected rejected session 88888 to be strictly excluded from /api/query when includeRejected is false');
+    }
+    console.log('Verified: /api/query strictly excludes rejected session when includeRejected is false!');
+
+    // Clean up test session
+    db.prepare('DELETE FROM test_values WHERE session_id = ?').run(sRej);
+    db.prepare('DELETE FROM sessions WHERE id = ?').run(sRej);
+
     console.log('ALL API TESTS PASSED SUCCESSFULLY!');
   } catch (err) {
     console.error('Test failed:', err.response?.data || err.message);
@@ -179,7 +334,14 @@ const server = app.listen(5099, async () => {
       DELETE FROM units;
       DELETE FROM unit_test_collections;
       DELETE FROM presets;
+      DELETE FROM settings;
     `);
+    if (originalSettings && originalSettings.length > 0) {
+      const insertSetting = db.prepare('INSERT INTO settings (key, value) VALUES (?, ?)');
+      for (const s of originalSettings) {
+        insertSetting.run(s.key, s.value);
+      }
+    }
     server.close();
   }
 });

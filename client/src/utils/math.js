@@ -86,6 +86,144 @@ export function computeLinearRegression(points, isDateX = false) {
   };
 }
 
+export function computePolynomialRegression(points, order = 2, isDateX = false) {
+  if (!points || points.length < 2) return null;
+
+  const valid = [...points]
+    .filter(p => typeof p.x === 'number' && !isNaN(p.x) && typeof p.y === 'number' && !isNaN(p.y))
+    .sort((a, b) => a.x - b.x);
+
+  const n = valid.length;
+  const deg = Math.max(1, Math.min(6, parseInt(order, 10) || 2));
+  if (n < deg + 1) return null;
+
+  // Normalize x values to prevent numerical instability with large numbers (e.g. millisecond timestamps)
+  let sumX = 0;
+  let sumY = 0;
+  for (let i = 0; i < n; i++) {
+    sumX += valid[i].x;
+    sumY += valid[i].y;
+  }
+  const meanX = sumX / n;
+  const meanY = sumY / n;
+
+  let varX = 0;
+  for (let i = 0; i < n; i++) {
+    const diff = valid[i].x - meanX;
+    varX += diff * diff;
+  }
+  const stdX = Math.sqrt(varX / n) || 1;
+
+  // Build Vandermonde normal equations on standardized u = (x - meanX) / stdX
+  const m = deg + 1;
+  const A = Array.from({ length: m }, () => new Float64Array(m));
+  const B = new Float64Array(m);
+
+  // Precompute power sums of u
+  const uPowers = new Float64Array(2 * deg + 1);
+  for (let i = 0; i < n; i++) {
+    const u = (valid[i].x - meanX) / stdX;
+    let up = 1;
+    for (let p = 0; p <= 2 * deg; p++) {
+      uPowers[p] += up;
+      if (p < m) {
+        B[p] += up * valid[i].y;
+      }
+      up *= u;
+    }
+  }
+
+  for (let r = 0; r < m; r++) {
+    for (let c = 0; c < m; c++) {
+      A[r][c] = uPowers[r + c];
+    }
+  }
+
+  // Gaussian elimination with partial pivoting
+  for (let i = 0; i < m; i++) {
+    let maxRow = i;
+    for (let k = i + 1; k < m; k++) {
+      if (Math.abs(A[k][i]) > Math.abs(A[maxRow][i])) {
+        maxRow = k;
+      }
+    }
+    const tempA = A[i];
+    A[i] = A[maxRow];
+    A[maxRow] = tempA;
+
+    const tempB = B[i];
+    B[i] = B[maxRow];
+    B[maxRow] = tempB;
+
+    if (Math.abs(A[i][i]) < 1e-12) return null;
+
+    for (let k = i + 1; k < m; k++) {
+      const factor = A[k][i] / A[i][i];
+      for (let j = i; j < m; j++) {
+        A[k][j] -= factor * A[i][j];
+      }
+      B[k] -= factor * B[i];
+    }
+  }
+
+  // Back substitution
+  const coeffs = new Float64Array(m);
+  for (let i = m - 1; i >= 0; i--) {
+    let sum = B[i];
+    for (let j = i + 1; j < m; j++) {
+      sum -= A[i][j] * coeffs[j];
+    }
+    coeffs[i] = sum / A[i][i];
+  }
+
+  const evalPoly = (xVal) => {
+    const u = (xVal - meanX) / stdX;
+    let res = 0;
+    let up = 1;
+    for (let p = 0; p < m; p++) {
+      res += coeffs[p] * up;
+      up *= u;
+    }
+    return res;
+  };
+
+  // Compute R2
+  let ssTot = 0;
+  let ssRes = 0;
+  for (let i = 0; i < n; i++) {
+    const yHat = evalPoly(valid[i].x);
+    const dy = valid[i].y - meanY;
+    const res = valid[i].y - yHat;
+    ssTot += dy * dy;
+    ssRes += res * res;
+  }
+  const r2 = ssTot > 0 ? Math.max(0, Math.min(1, 1 - ssRes / ssTot)) : 1;
+
+  // Generate smooth trend points
+  const minX = valid[0].x;
+  const maxX = valid[n - 1].x;
+  const numSteps = Math.min(80, Math.max(20, n * 2));
+  const step = (maxX - minX) / (numSteps - 1);
+
+  const trendPoints = [];
+  for (let s = 0; s < numSteps; s++) {
+    const curX = minX + s * step;
+    trendPoints.push({
+      x: curX,
+      y: Math.round(evalPoly(curX) * 1000) / 1000
+    });
+  }
+
+  return {
+    order: deg,
+    r2: Math.round(r2 * 1000) / 1000,
+    equation: `Polynomial (Order ${deg})`,
+    formattedRate: `Poly (d=${deg})`,
+    trendPoints
+  };
+}
+
+
 export function computeMovingAverage(points, windowSize = 5) {
   if (!points || points.length < windowSize) return [];
 
