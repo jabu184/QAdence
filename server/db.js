@@ -91,14 +91,17 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_test_values_session ON test_values(session_id);
   CREATE INDEX IF NOT EXISTS idx_test_values_name ON test_values(test_name);
   CREATE INDEX IF NOT EXISTS idx_test_values_numeric ON test_values(value_numeric);
+  CREATE INDEX IF NOT EXISTS idx_test_values_name_sess ON test_values(test_name, session_id);
   CREATE INDEX IF NOT EXISTS idx_sessions_unit ON sessions(unit_name);
   CREATE INDEX IF NOT EXISTS idx_sessions_date ON sessions(work_completed);
+  CREATE INDEX IF NOT EXISTS idx_sessions_test_list ON sessions(test_list_name);
 
   CREATE TABLE IF NOT EXISTS presets (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL,
     description TEXT,
     config_json TEXT NOT NULL,
+    order_index INTEGER DEFAULT 0,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
   );
@@ -147,6 +150,11 @@ try {
     db.exec("ALTER TABLE unit_test_collections ADD COLUMN active INTEGER DEFAULT 1");
   }
   db.exec("CREATE INDEX IF NOT EXISTS idx_utc_active ON unit_test_collections(active)");
+
+  const presetCols = db.prepare("PRAGMA table_info(presets)").all().map(c => c.name);
+  if (!presetCols.includes('order_index')) {
+    db.exec("ALTER TABLE presets ADD COLUMN order_index INTEGER DEFAULT 0");
+  }
 } catch (e) {
   console.warn('Migration warning:', e.message);
 }

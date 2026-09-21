@@ -1,5 +1,5 @@
 import React, { useMemo } from 'react';
-import { Plus, Trash2, Copy, Eye, EyeOff, Layers, Sliders, TrendingUp, Globe, RefreshCw, Sparkles } from 'lucide-react';
+import { Plus, Trash2, Copy, Eye, EyeOff, Layers, Sliders, TrendingUp, Globe, RefreshCw, Sparkles, CloudDownload } from 'lucide-react';
 import FilterControls from './FilterControls';
 import SearchableVariableSelect from './SearchableVariableSelect';
 import { groupTestsByList, getSortedGroupedTests, getUniqueTests } from '../utils/testGrouping';
@@ -45,8 +45,10 @@ export default function DatasetManager({
   onChangeDisplayMode,
   trendlineConfig,
   onChangeTrendlineConfig,
-  // On-demand data retrieval actions
+  // Data retrieval & local analysis actions
   onRetrieveData,
+  onRunLocalQuery,
+  onFetchFromQATrack,
   onLoadDemoData,
   isLoading = false,
   totalLoadedRecords = 0,
@@ -137,22 +139,22 @@ export default function DatasetManager({
             />
           </div>
 
-          {/* On-Demand Data Retrieval Action & Status */}
+          {/* Data Retrieval & Analysis Actions */}
           <div>
             <label style={{ fontSize: '0.78rem', fontWeight: '700', color: '#1e293b', display: 'block', marginBottom: '0.35rem' }}>
-              QATrack+ Data
+              Data Actions
             </label>
             <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
               <button
                 type="button"
                 onClick={() => onRetrieveData && onRetrieveData()}
                 disabled={isLoading}
-                title="Fetch measurements and analyze data for the configured datasets and variables"
+                title="Filter and plot data using local SQLite storage (lightning-fast, no QATrack network call)"
                 style={{
                   display: 'flex',
                   alignItems: 'center',
                   gap: '6px',
-                  padding: '0.52rem 1rem',
+                  padding: '0.52rem 0.95rem',
                   borderRadius: '8px',
                   background: isLoading ? '#93c5fd' : (isConfigStale ? '#ea580c' : '#2563eb'),
                   color: '#ffffff',
@@ -168,11 +170,37 @@ export default function DatasetManager({
                 {isLoading
                   ? 'Loading Data...'
                   : (!hasLoaded
-                      ? 'Retrieve & Load Data'
-                      : (isConfigStale ? '● Update / Load Data' : 'Reload / Retrieve Data')
+                      ? 'Load Data (Local)'
+                      : (isConfigStale ? '● Update Plot' : 'Update Plot')
                     )
                 }
               </button>
+
+              {onFetchFromQATrack && (
+                <button
+                  type="button"
+                  onClick={() => onFetchFromQATrack && onFetchFromQATrack()}
+                  disabled={isLoading}
+                  title="Connect to QATrack+ server to download latest QA sessions into local database"
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '5px',
+                    padding: '0.52rem 0.85rem',
+                    borderRadius: '8px',
+                    background: '#f8fafc',
+                    color: '#0284c7',
+                    border: '1px solid #bae6fd',
+                    fontSize: '0.80rem',
+                    fontWeight: '600',
+                    cursor: isLoading ? 'not-allowed' : 'pointer',
+                    transition: 'all 0.15s ease'
+                  }}
+                >
+                  <CloudDownload size={14} />
+                  Fetch from QATrack+
+                </button>
+              )}
 
               {totalLoadedRecords > 0 ? (
                 <span style={{
@@ -184,7 +212,7 @@ export default function DatasetManager({
                   borderRadius: '6px',
                   border: '1px solid #a7f3d0'
                 }}>
-                  ✓ {totalLoadedRecords} pts
+                  ✓ {totalLoadedRecords} pts (Local)
                 </span>
               ) : (
                 <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
@@ -197,7 +225,7 @@ export default function DatasetManager({
                     borderRadius: '6px',
                     border: '1px solid #e2e8f0'
                   }}>
-                    {hasLoaded ? '0 pts found' : 'Ready to load'}
+                    {hasLoaded ? '0 pts matched' : 'Local DB Ready'}
                   </span>
                   {onLoadDemoData && (
                     <button
@@ -247,7 +275,8 @@ export default function DatasetManager({
               {[
                 { id: 'scatter', label: 'Scatter (Points)' },
                 { id: 'line', label: 'Line (Connected)' },
-                { id: 'distribution', label: 'Distribution' }
+                { id: 'distribution', label: 'Histogram' },
+                { id: 'normal', label: 'Normal Distribution' }
               ].map(mode => {
                 const isActive = displayMode === mode.id;
                 return (
@@ -383,6 +412,89 @@ export default function DatasetManager({
                     </span>
                   </div>
                 )}
+
+                {/* Forecast Horizon Controls */}
+                <div style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '6px',
+                  borderLeft: '1px solid #cbd5e1',
+                  paddingLeft: '8px',
+                  marginLeft: '2px'
+                }}>
+                  <label style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '5px',
+                    fontSize: '0.78rem',
+                    fontWeight: '700',
+                    color: trendlineConfig.forecastEnabled ? '#2563eb' : '#475569',
+                    cursor: 'pointer',
+                    whiteSpace: 'nowrap'
+                  }}>
+                    <input
+                      type="checkbox"
+                      checked={Boolean(trendlineConfig.forecastEnabled)}
+                      onChange={(e) => onChangeTrendlineConfig({
+                        ...trendlineConfig,
+                        forecastEnabled: e.target.checked,
+                        forecastValue: trendlineConfig.forecastValue ?? 30,
+                        forecastUnit: trendlineConfig.forecastUnit || 'days'
+                      })}
+                      style={{ cursor: 'pointer' }}
+                    />
+                    Forecast:
+                  </label>
+
+                  {trendlineConfig.forecastEnabled && (
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
+                      <input
+                        type="number"
+                        min={1}
+                        max={3650}
+                        step={1}
+                        title="Forecast duration into future"
+                        value={trendlineConfig.forecastValue ?? 30}
+                        onChange={(e) => {
+                          const val = parseInt(e.target.value, 10);
+                          onChangeTrendlineConfig({
+                            ...trendlineConfig,
+                            forecastValue: isNaN(val) ? 1 : Math.max(1, val)
+                          });
+                        }}
+                        style={{
+                          width: '52px',
+                          padding: '0.4rem 0.35rem',
+                          borderRadius: '6px',
+                          border: '1px solid #cbd5e1',
+                          fontSize: '0.78rem',
+                          fontWeight: '700',
+                          textAlign: 'center',
+                          background: '#ffffff'
+                        }}
+                      />
+                      <select
+                        value={trendlineConfig.forecastUnit || 'days'}
+                        onChange={(e) => onChangeTrendlineConfig({
+                          ...trendlineConfig,
+                          forecastUnit: e.target.value
+                        })}
+                        style={{
+                          padding: '0.42rem 0.45rem',
+                          borderRadius: '6px',
+                          border: '1px solid #cbd5e1',
+                          fontSize: '0.76rem',
+                          fontWeight: '600',
+                          background: '#ffffff',
+                          color: '#1e293b'
+                        }}
+                      >
+                        <option value="days">Days</option>
+                        <option value="months">Months</option>
+                      </select>
+                    </div>
+                  )}
+                </div>
               </div>
             )}
           </div>
@@ -429,7 +541,7 @@ export default function DatasetManager({
             }}
           >
             <RefreshCw size={13} className={isLoading ? 'spin' : ''} />
-            Retrieve & Load Data
+            Load Data (Local)
           </button>
         </div>
       ) : isConfigStale ? (
@@ -449,7 +561,7 @@ export default function DatasetManager({
           <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
             <span style={{ fontSize: '1rem' }}>⚠️</span>
             <span>
-              Dataset configuration has changed. Click <strong>Update / Load Data</strong> to re-run analysis with your changes.
+              Dataset configuration has changed. Click <strong>Update Plot</strong> to re-run locally with your changes.
             </span>
           </div>
           <button
@@ -471,7 +583,7 @@ export default function DatasetManager({
             }}
           >
             <RefreshCw size={13} className={isLoading ? 'spin' : ''} />
-            Update / Load Data
+            Update Plot
           </button>
         </div>
       ) : (totalLoadedRecords === 0 && yVariable) ? (
@@ -491,30 +603,55 @@ export default function DatasetManager({
           <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
             <span style={{ fontSize: '1rem' }}>ℹ️</span>
             <span>
-              No data points found for <strong>{yVariable}</strong> with the current machine/filter scope.
+              No data points found for <strong>{yVariable}</strong> in local database.
             </span>
           </div>
-          <button
-            type="button"
-            onClick={() => onRetrieveData && onRetrieveData()}
-            disabled={isLoading}
-            style={{
-              display: 'flex',
-              alignItems: 'center',
-              gap: '6px',
-              padding: '0.35rem 0.85rem',
-              borderRadius: '6px',
-              background: '#2563eb',
-              color: '#ffffff',
-              fontSize: '0.78rem',
-              fontWeight: '600',
-              border: 'none',
-              cursor: isLoading ? 'not-allowed' : 'pointer'
-            }}
-          >
-            <RefreshCw size={13} className={isLoading ? 'spin' : ''} />
-            Retry Retrieve
-          </button>
+          <div style={{ display: 'flex', gap: '8px' }}>
+            {onFetchFromQATrack && (
+              <button
+                type="button"
+                onClick={() => onFetchFromQATrack && onFetchFromQATrack()}
+                disabled={isLoading}
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '5px',
+                  padding: '0.35rem 0.85rem',
+                  borderRadius: '6px',
+                  background: '#0284c7',
+                  color: '#ffffff',
+                  fontSize: '0.78rem',
+                  fontWeight: '600',
+                  border: 'none',
+                  cursor: isLoading ? 'not-allowed' : 'pointer'
+                }}
+              >
+                <CloudDownload size={13} />
+                Fetch from QATrack+
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={() => onRetrieveData && onRetrieveData()}
+              disabled={isLoading}
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: '6px',
+                padding: '0.35rem 0.85rem',
+                borderRadius: '6px',
+                background: '#2563eb',
+                color: '#ffffff',
+                fontSize: '0.78rem',
+                fontWeight: '600',
+                border: 'none',
+                cursor: isLoading ? 'not-allowed' : 'pointer'
+              }}
+            >
+              <RefreshCw size={13} className={isLoading ? 'spin' : ''} />
+              Retry Local
+            </button>
+          </div>
         </div>
       ) : null}
 
@@ -691,6 +828,8 @@ export default function DatasetManager({
             plotType={displayMode}
             onChangePlotType={onChangeDisplayMode}
             isMultiDatasetMode={true}
+            onRunQuery={onRetrieveData}
+            isConfigStale={isConfigStale}
             onSplitByFilter={(testName, values) => onSplitDatasetByFilter && onSplitDatasetByFilter(activeDataset.id, testName, values)}
             onSplitByUnit={(targetUnits) => onSplitDatasetByUnit && onSplitDatasetByUnit(activeDataset.id, targetUnits)}
           />

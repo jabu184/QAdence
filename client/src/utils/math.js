@@ -82,7 +82,8 @@ export function computeLinearRegression(points, isDateX = false) {
     trendPoints: [
       { x: minX, y: slope * minX + intercept },
       { x: maxX, y: slope * maxX + intercept }
-    ]
+    ],
+    predict: (x) => slope * x + intercept
   };
 }
 
@@ -219,8 +220,29 @@ export function computePolynomialRegression(points, order = 2, isDateX = false) 
     r2: Math.round(r2 * 1000) / 1000,
     equation: `Polynomial (Order ${deg})`,
     formattedRate: `Poly (d=${deg})`,
-    trendPoints
+    trendPoints,
+    predict: evalPoly
   };
+}
+
+export function generateForecastPoints(regResult, startX, forecastDelta, numSteps = 25) {
+  if (!regResult || typeof regResult.predict !== 'function' || !forecastDelta || forecastDelta <= 0) {
+    return [];
+  }
+  const endX = startX + forecastDelta;
+  const points = [];
+  const steps = Math.max(2, Math.min(50, numSteps));
+  const stepSize = (endX - startX) / (steps - 1);
+
+  for (let s = 0; s < steps; s++) {
+    const curX = startX + s * stepSize;
+    const yVal = regResult.predict(curX);
+    points.push({
+      x: curX,
+      y: Math.round(yVal * 1000) / 1000
+    });
+  }
+  return points;
 }
 
 
@@ -299,3 +321,28 @@ export function computeBoxPlotStats(numbers) {
   };
 }
 
+export function computeNormalDistribution(numbers) {
+  if (!numbers || numbers.length === 0) return null;
+  const valid = numbers.filter(v => typeof v === 'number' && !isNaN(v));
+  const n = valid.length;
+  if (n < 2) return null;
+
+  const sum = valid.reduce((acc, v) => acc + v, 0);
+  const mean = sum / n;
+  const variance = valid.reduce((acc, v) => acc + Math.pow(v - mean, 2), 0) / (n - 1);
+  const stdDev = Math.sqrt(variance) || 0.001;
+
+  const sqrtTwoPi = Math.sqrt(2 * Math.PI);
+  const pdf = (x) => {
+    const z = (x - mean) / stdDev;
+    return (1 / (stdDev * sqrtTwoPi)) * Math.exp(-0.5 * z * z);
+  };
+
+  return {
+    n,
+    mean: Math.round(mean * 1000) / 1000,
+    stdDev: Math.round(stdDev * 1000) / 1000,
+    variance: Math.round(variance * 1000) / 1000,
+    pdf
+  };
+}

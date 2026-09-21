@@ -1,5 +1,5 @@
 import React from 'react';
-import { Activity, RefreshCw, Settings, Database, Bookmark, PlusCircle, Trash2, RotateCcw, Sparkles, Download, Upload } from 'lucide-react';
+import { Activity, RefreshCw, Settings, Database, Bookmark, PlusCircle, RotateCcw, Sparkles, SlidersHorizontal, Trash2 } from 'lucide-react';
 
 export default function Navbar({
   status,
@@ -8,9 +8,7 @@ export default function Navbar({
   onSelectPreset,
   onOpenSettings,
   onOpenSavePreset,
-  onOpenImportPreset,
-  onExportPreset,
-  onDeletePreset,
+  onOpenPresetManager,
   onSync,
   onClearData,
   onNewAnalysis,
@@ -103,26 +101,6 @@ export default function Navbar({
             ))}
           </select>
 
-          {selectedPreset && (
-            <button
-              type="button"
-              onClick={() => onDeletePreset && onDeletePreset(selectedPreset)}
-              title="Delete this preset"
-              style={{
-                padding: '0.45rem',
-                borderRadius: '8px',
-                border: '1px solid #fecaca',
-                background: '#fef2f2',
-                color: '#dc2626',
-                display: 'flex',
-                alignItems: 'center',
-                cursor: 'pointer'
-              }}
-            >
-              <Trash2 size={14} />
-            </button>
-          )}
-
           <button
             onClick={onOpenSavePreset}
             title={selectedPreset ? "Save or overwrite preset" : "Save current view as preset"}
@@ -143,8 +121,8 @@ export default function Navbar({
           </button>
 
           <button
-            onClick={onExportPreset}
-            title={selectedPreset ? "Export selected preset as JSON file" : "Export all presets as JSON file"}
+            onClick={onOpenPresetManager}
+            title="Open Preset Manager to edit, reorder, export, import, or delete presets"
             style={{
               padding: '0.45rem 0.65rem',
               borderRadius: '8px',
@@ -158,26 +136,7 @@ export default function Navbar({
               cursor: 'pointer'
             }}
           >
-            <Download size={14} /> Export
-          </button>
-
-          <button
-            onClick={onOpenImportPreset}
-            title="Import QA presets from JSON file"
-            style={{
-              padding: '0.45rem 0.65rem',
-              borderRadius: '8px',
-              border: '1px solid #cbd5e1',
-              background: '#ffffff',
-              color: '#475569',
-              fontSize: '0.8rem',
-              display: 'flex',
-              alignItems: 'center',
-              gap: '4px',
-              cursor: 'pointer'
-            }}
-          >
-            <Upload size={14} /> Import
+            <SlidersHorizontal size={14} /> Manage
           </button>
 
           {activePreset?.description && (

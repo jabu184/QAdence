@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { Filter, Plus, Trash2, Sliders, Layers, BarChart2, TrendingUp, ScatterChart as ScatterIcon, PieChart, Sparkles } from 'lucide-react';
+import { Filter, Plus, Trash2, Sliders, Layers, BarChart2, TrendingUp, ScatterChart as ScatterIcon, PieChart, Sparkles, Activity } from 'lucide-react';
 import { groupTestsByList } from '../utils/testGrouping';
 import SearchableVariableSelect from './SearchableVariableSelect';
 
@@ -30,8 +30,8 @@ export default function FilterControls({
   testLists = [],
   selectedTestLists = [],
   onChangeTestLists,
-  includeAllInstances = true,
-  onChangeIncludeAllInstances
+  onChangeIncludeAllInstances,
+  isConfigStale = false
 }) {
   const [testValuesCache, setTestValuesCache] = useState({});
   const [splittingTest, setSplittingTest] = useState(null);
@@ -446,22 +446,49 @@ export default function FilterControls({
               (e.g. Extract measurements where Site = 'Prostate' or Energy = '6MV')
             </span>
           </div>
-          <button
-            onClick={handleAddFilter}
-            style={{
-              display: 'flex',
-              alignItems: 'center',
-              gap: '4px',
-              padding: '4px 8px',
-              borderRadius: '6px',
-              background: '#eff6ff',
-              color: '#2563eb',
-              fontSize: '0.8rem',
-              fontWeight: '600'
-            }}
-          >
-            <Plus size={14} /> Add Condition Filter
-          </button>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+            {onRunQuery && isConfigStale && (
+              <button
+                type="button"
+                onClick={onRunQuery}
+                title="Apply filters immediately using local database (no QATrack call)"
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '4px',
+                  padding: '4px 10px',
+                  borderRadius: '6px',
+                  background: '#ea580c',
+                  color: '#ffffff',
+                  fontSize: '0.8rem',
+                  fontWeight: '700',
+                  border: 'none',
+                  cursor: 'pointer',
+                  boxShadow: '0 1px 2px rgba(0,0,0,0.1)'
+                }}
+              >
+                ● Apply Filters
+              </button>
+            )}
+            <button
+              onClick={handleAddFilter}
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: '4px',
+                padding: '4px 8px',
+                borderRadius: '6px',
+                background: '#eff6ff',
+                color: '#2563eb',
+                fontSize: '0.8rem',
+                fontWeight: '600',
+                border: 'none',
+                cursor: 'pointer'
+              }}
+            >
+              <Plus size={14} /> Add Condition Filter
+            </button>
+          </div>
         </div>
 
         {filters.length === 0 ? (
@@ -695,7 +722,8 @@ export default function FilterControls({
             {[
               { id: 'scatter', label: 'Scatter (X vs Y)', icon: ScatterIcon },
               { id: 'trend', label: 'Trend', icon: TrendingUp },
-              { id: 'distribution', label: 'Distribution', icon: BarChart2 }
+              { id: 'distribution', label: 'Distribution', icon: BarChart2 },
+              { id: 'normal', label: 'Normal Curve', icon: Activity }
             ].map(pt => {
               const Icon = pt.icon;
               const isActive = plotType === pt.id;

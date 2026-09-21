@@ -2,7 +2,7 @@ import React, { useState, useMemo } from 'react';
 import { Download, Table, CheckCircle2, TrendingUp } from 'lucide-react';
 import BoxWhiskerPlot from './BoxWhiskerPlot';
 import CorrelationAnalysisPanel from './CorrelationAnalysisPanel';
-import { computePolynomialRegression } from '../utils/math';
+import { computeLinearRegression, computeMovingAverage, computePolynomialRegression } from '../utils/math';
 
 export default function DatasetComparisonTable({
   datasets = [],
@@ -10,7 +10,8 @@ export default function DatasetComparisonTable({
   ignoredSessionIds = [],
   yVariable,
   xVariable,
-  trendlineConfig
+  trendlineConfig,
+  baselineConfig
 }) {
   const ignoredSet = useMemo(() => new Set(ignoredSessionIds), [ignoredSessionIds]);
   const isDateX = !xVariable || xVariable === 'work_completed';
@@ -221,6 +222,9 @@ export default function DatasetComparisonTable({
                     'right'
                   )}
                   {renderHeader('r2', 'R² Fit', 'right')}
+                  {trendlineConfig.forecastEnabled && Number(trendlineConfig.forecastValue) > 0 && (
+                    renderHeader('forecast', `Forecast (+${trendlineConfig.forecastValue} ${trendlineConfig.forecastUnit || 'days'})`, 'right')
+                  )}
                 </>
               )}
             </tr>
@@ -333,6 +337,37 @@ export default function DatasetComparisonTable({
                       }
                     }
 
+                    let forecastText = '-';
+                    if (trendlineConfig.forecastEnabled && Number(trendlineConfig.forecastValue) > 0) {
+                      const activePts = (res?.dataPoints || []).filter(p => !ignoredSet.has(p.sessionId)).sort((a, b) => a.x - b.x);
+                      if (activePts.length >= 2) {
+                        const fVal = Number(trendlineConfig.forecastValue);
+                        const fUnit = trendlineConfig.forecastUnit || 'days';
+                        const delta = isDateX
+                          ? (fUnit === 'months' ? fVal * 30.4375 * 86400000 : fVal * 86400000)
+                          : fVal;
+                        const targetX = activePts[activePts.length - 1].x + delta;
+
+                        if (trendlineConfig.type === 'polynomial') {
+                          const poly = computePolynomialRegression(activePts, trendlineConfig.order || 2, isDateX);
+                          if (poly && typeof poly.predict === 'function') {
+                            forecastText = (Math.round(poly.predict(targetX) * 100) / 100).toFixed(2);
+                          }
+                        } else if (trendlineConfig.type === 'moving_average') {
+                          const k = trendlineConfig.windowSize || 5;
+                          const ma = computeMovingAverage(activePts, k);
+                          if (ma.length > 0) {
+                            forecastText = (Math.round(ma[ma.length - 1].y * 100) / 100).toFixed(2);
+                          }
+                        } else {
+                          const regObj = computeLinearRegression(activePts, isDateX);
+                          if (regObj && typeof regObj.predict === 'function') {
+                            forecastText = (Math.round(regObj.predict(targetX) * 100) / 100).toFixed(2);
+                          }
+                        }
+                      }
+                    }
+
                     return (
                       <>
                         <td style={{ padding: '10px 12px', textAlign: 'right', fontWeight: '600', color: driftText !== 'N/A' ? '#d97706' : '#94a3b8' }}>
@@ -341,6 +376,11 @@ export default function DatasetComparisonTable({
                         <td style={{ padding: '10px 12px', textAlign: 'right', color: r2Text !== 'N/A' && r2Text !== '-' ? '#334155' : '#94a3b8' }}>
                           {r2Text}
                         </td>
+                        {trendlineConfig.forecastEnabled && Number(trendlineConfig.forecastValue) > 0 && (
+                          <td style={{ padding: '10px 12px', textAlign: 'right', fontWeight: '700', color: forecastText !== '-' ? '#2563eb' : '#94a3b8' }}>
+                            {forecastText}
+                          </td>
+                        )}
                       </>
                     );
                   })()}
@@ -357,6 +397,7 @@ export default function DatasetComparisonTable({
         datasetResults={datasetResults}
         ignoredSessionIds={ignoredSessionIds}
         yVariable={yVariable}
+        baselineConfig={baselineConfig}
       />
 
       {/* Dual-Variable Statistical Correlation & Dependence Analysis */}

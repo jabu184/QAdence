@@ -6,7 +6,7 @@ import DatasetComparisonTable from './components/DatasetComparisonTable';
 import DataTable from './components/DataTable';
 import SettingsModal from './components/SettingsModal';
 import SavePresetModal from './components/SavePresetModal';
-import PresetImportModal from './components/PresetImportModal';
+import PresetManagerModal from './components/PresetManagerModal';
 import SyncProgressModal from './components/SyncProgressModal';
 import { BarChart3, Table as TableIcon, RefreshCw } from 'lucide-react';
 import { calculateStats, computeLinearRegression } from './utils/math';
@@ -56,7 +56,19 @@ export default function App() {
     enabled: false,
     type: 'linear',
     windowSize: 5,
-    order: 2
+    order: 2,
+    forecastEnabled: false,
+    forecastValue: 30,
+    forecastUnit: 'days'
+  });
+
+  // Reference baseline value and +/- tolerance limits state
+  const [baselineConfig, setBaselineConfig] = useState({
+    enabled: false,
+    baseline: '',
+    upperTol: '',
+    lowerTol: '',
+    symmetric: true
   });
 
   // Ignored / Excluded points state
@@ -74,7 +86,7 @@ export default function App() {
   // Modals state
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isSavePresetOpen, setIsSavePresetOpen] = useState(false);
-  const [isImportPresetOpen, setIsImportPresetOpen] = useState(false);
+  const [isPresetManagerOpen, setIsPresetManagerOpen] = useState(false);
   const [isSyncModalOpen, setIsSyncModalOpen] = useState(false);
   const [syncStatus, setSyncStatus] = useState({
     isRunning: false,
@@ -299,7 +311,16 @@ export default function App() {
     setIgnoredSessionIds([]);
     setSelectedPresetId('');
     setSelectedTestList('');
-    setTrendlineConfig({ enabled: false, type: 'linear', windowSize: 5, order: 2 });
+    setTrendlineConfig({
+      enabled: false,
+      type: 'linear',
+      windowSize: 5,
+      order: 2,
+      forecastEnabled: false,
+      forecastValue: 30,
+      forecastUnit: 'days'
+    });
+    setBaselineConfig({ enabled: false, baseline: '', upperTol: '', lowerTol: '', symmetric: true });
     setIncludeAllInstances(true);
     setDisplayMode('scatter');
     setActiveTab('chart');
@@ -319,7 +340,20 @@ export default function App() {
     }
   }, [selectedTestList, tests, yVariable]);
 
-  // Execute Queries for all Datasets
+  // In-memory query cache for instantaneous preset toggling and repeated local queries
+  const queryCacheRef = useRef(new Map());
+
+  const getQueryCacheKey = (ds, effectiveX, effectiveY, effectiveSelectedTestList, effectiveIncludeAll) => {
+    const effLists = !effectiveIncludeAll && effectiveSelectedTestList
+      ? [effectiveSelectedTestList]
+      : (ds.testLists || []);
+    const uKey = (ds.units || []).slice().sort().join(',');
+    const tlKey = effLists.slice().sort().join(',');
+    const fKey = (ds.filters || []).map(f => `${f.testName}:${f.operator}:${f.value}`).join(';');
+    return `${effectiveY}|${effectiveX || 'work_completed'}|${effectiveIncludeAll ? '1' : '0'}|${effectiveSelectedTestList || ''}|${uKey}|${tlKey}|${ds.dateFrom || ''}|${ds.dateTo || ''}|${fKey}`;
+  };
+
+  // Execute Queries for all Datasets (Local SQLite + In-Memory Cache)
   const runAllQueries = useCallback(async (options = {}) => {
     const {
       pullOnDemand = false,
@@ -327,7 +361,8 @@ export default function App() {
       yVariable: overrideY,
       xVariable: overrideX,
       selectedTestList: overrideTestList,
-      includeAllInstances: overrideIncludeAll
+      includeAllInstances: overrideIncludeAll,
+      forceRefresh = false
     } = options;
 
     const activeDatasets = overrideDatasets || datasets;
@@ -336,7 +371,7 @@ export default function App() {
     const effectiveSelectedTestList = overrideTestList !== undefined ? overrideTestList : selectedTestList;
     const effectiveIncludeAll = overrideIncludeAll !== undefined ? overrideIncludeAll : includeAllInstances;
 
-    if (!effectiveY || activeDatasets.length === 0) return;
+    if (!effectiveY || activeDatasets.length === 0) return { totalPoints: 0, needsPull: false };
     setIsLoading(true);
 
     try {
@@ -344,31 +379,57 @@ export default function App() {
       const isDateX = !effectiveX || effectiveX === 'work_completed';
 
       const resultsMap = {};
+      let totalPoints = 0;
+      let anyNeedsPull = false;
 
       await Promise.all(
         activeDatasets.map(async ds => {
-          const effectiveTestLists = !effectiveIncludeAll && effectiveSelectedTestList
-            ? [effectiveSelectedTestList]
-            : (ds.testLists || []);
+          const cacheKey = getQueryCacheKey(ds, effectiveX, effectiveY, effectiveSelectedTestList, effectiveIncludeAll);
+          let allPts = [];
+          let tableRows = [];
+          let needsPull = false;
 
-          const res = await fetch('/api/query', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              units: ds.units,
-              testLists: effectiveTestLists,
-              testList: !effectiveIncludeAll ? effectiveSelectedTestList : '',
-              includeAllInstances: effectiveIncludeAll,
-              dateFrom: ds.dateFrom,
-              dateTo: ds.dateTo,
-              filters: ds.filters,
-              xVariable: effectiveX,
-              yVariable: effectiveY,
-              pullOnDemand
-            })
-          });
-          const data = await res.json();
-          const allPts = data.dataPoints || [];
+          if (!forceRefresh && queryCacheRef.current.has(cacheKey)) {
+            const cached = queryCacheRef.current.get(cacheKey);
+            allPts = cached.dataPoints || [];
+            tableRows = cached.tableRows || [];
+            needsPull = cached.needsPull || false;
+          } else {
+            const effectiveTestLists = !effectiveIncludeAll && effectiveSelectedTestList
+              ? [effectiveSelectedTestList]
+              : (ds.testLists || []);
+
+            const res = await fetch('/api/query', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                units: ds.units,
+                testLists: effectiveTestLists,
+                testList: !effectiveIncludeAll ? effectiveSelectedTestList : '',
+                includeAllInstances: effectiveIncludeAll,
+                dateFrom: ds.dateFrom,
+                dateTo: ds.dateTo,
+                filters: ds.filters,
+                xVariable: effectiveX,
+                yVariable: effectiveY,
+                pullOnDemand
+              })
+            });
+            const data = await res.json();
+            allPts = data.dataPoints || [];
+            tableRows = data.tableRows || [];
+            needsPull = Boolean(data.needsPull);
+
+            queryCacheRef.current.set(cacheKey, {
+              dataPoints: allPts,
+              tableRows,
+              needsPull
+            });
+          }
+
+          if (needsPull) anyNeedsPull = true;
+          totalPoints += allPts.length;
+
           const activePts = allPts.filter(p => !ignoredSet.has(p.sessionId));
           const yVals = activePts.map(p => p.y).filter(v => typeof v === 'number' && !isNaN(v));
 
@@ -377,7 +438,7 @@ export default function App() {
 
           resultsMap[ds.id] = {
             dataPoints: allPts,
-            tableRows: (data.tableRows || []).map(r => ({
+            tableRows: tableRows.map(r => ({
               ...r,
               datasetName: ds.name,
               datasetColor: ds.color
@@ -409,8 +470,10 @@ export default function App() {
       });
       setIsConfigStale(false);
       setHasLoaded(true);
+      return { totalPoints, needsPull: anyNeedsPull };
     } catch (err) {
       console.error('Multi-dataset query error:', err);
+      return { totalPoints: 0, needsPull: false };
     } finally {
       setIsLoading(false);
     }
@@ -424,6 +487,7 @@ export default function App() {
       yVariable,
       selectedTestList,
       includeAllInstances,
+      baselineConfig,
       datasets: datasets.map(d => ({
         id: d.id,
         units: [...(d.units || [])].sort(),
@@ -436,7 +500,7 @@ export default function App() {
         }))
       }))
     });
-  }, [xVariable, yVariable, selectedTestList, includeAllInstances, datasets]);
+  }, [xVariable, yVariable, selectedTestList, includeAllInstances, baselineConfig, datasets]);
 
   // Compute scoped tests based on selected Measurement Variable (Y-Axis)
   const scopedTests = useMemo(() => {
@@ -500,7 +564,7 @@ export default function App() {
     }
   };
 
-  // Handle Presets
+  // Handle Presets (Instant Local Loading)
   const handleSelectPreset = (id, overridePresets) => {
     setSelectedPresetId(id);
     if (!id) return;
@@ -508,17 +572,17 @@ export default function App() {
     const preset = pool.find(p => String(p.id) === String(id));
     if (preset && preset.config) {
       const cfg = preset.config;
-      if (cfg.xVariable !== undefined) setXVariable(cfg.xVariable);
-      if (cfg.yVariable !== undefined) setYVariable(cfg.yVariable);
-      if (cfg.selectedTestList !== undefined) setSelectedTestList(cfg.selectedTestList);
-      if (cfg.includeAllInstances !== undefined) setIncludeAllInstances(cfg.includeAllInstances);
-      if (cfg.plotType) setDisplayMode(cfg.plotType === 'trend' ? 'line' : cfg.plotType);
+      const nextX = cfg.xVariable !== undefined ? cfg.xVariable : xVariable;
+      const nextY = cfg.yVariable !== undefined ? cfg.yVariable : yVariable;
+      const nextList = cfg.selectedTestList !== undefined ? cfg.selectedTestList : selectedTestList;
+      const nextIncludeAll = cfg.includeAllInstances !== undefined ? cfg.includeAllInstances : includeAllInstances;
+
+      let nextDatasets = datasets;
       if (cfg.datasets && Array.isArray(cfg.datasets)) {
-        setDatasets(cfg.datasets);
-        if (cfg.datasets[0]?.id) setActiveDatasetId(cfg.datasets[0].id);
+        nextDatasets = cfg.datasets;
       } else if (cfg.filters || cfg.units) {
         // Fallback for single-dataset presets
-        setDatasets([
+        nextDatasets = [
           {
             id: 'ds-1',
             name: preset.name || 'Data Set 1',
@@ -529,9 +593,74 @@ export default function App() {
             dateTo: cfg.dateTo || '',
             filters: cfg.filters || []
           }
-        ]);
-        setActiveDatasetId('ds-1');
+        ];
       }
+
+      if (cfg.xVariable !== undefined) setXVariable(cfg.xVariable);
+      if (cfg.yVariable !== undefined) setYVariable(cfg.yVariable);
+      if (cfg.selectedTestList !== undefined) setSelectedTestList(cfg.selectedTestList);
+      if (cfg.includeAllInstances !== undefined) setIncludeAllInstances(cfg.includeAllInstances);
+      if (cfg.displayMode) {
+        setDisplayMode(cfg.displayMode);
+      } else if (cfg.plotType) {
+        setDisplayMode(cfg.plotType === 'trend' ? 'line' : cfg.plotType);
+      }
+      if (cfg.trendlineConfig) {
+        setTrendlineConfig({
+          enabled: Boolean(cfg.trendlineConfig.enabled),
+          type: cfg.trendlineConfig.type || 'linear',
+          windowSize: cfg.trendlineConfig.windowSize || 5,
+          order: cfg.trendlineConfig.order || 2,
+          forecastEnabled: Boolean(cfg.trendlineConfig.forecastEnabled),
+          forecastValue: cfg.trendlineConfig.forecastValue ?? 30,
+          forecastUnit: cfg.trendlineConfig.forecastUnit || 'days'
+        });
+      }
+      if (cfg.baselineConfig) {
+        setBaselineConfig({
+          enabled: Boolean(cfg.baselineConfig.enabled),
+          baseline: cfg.baselineConfig.baseline ?? '',
+          upperTol: cfg.baselineConfig.upperTol ?? '',
+          lowerTol: cfg.baselineConfig.lowerTol ?? '',
+          symmetric: cfg.baselineConfig.symmetric !== undefined ? Boolean(cfg.baselineConfig.symmetric) : true
+        });
+      } else if (cfg.baseline !== undefined) {
+        setBaselineConfig({
+          enabled: true,
+          baseline: cfg.baseline ?? '',
+          upperTol: cfg.tolerancePlus ?? cfg.tolerance ?? '',
+          lowerTol: cfg.toleranceMinus ?? cfg.tolerance ?? '',
+          symmetric: true
+        });
+      } else {
+        setBaselineConfig({
+          enabled: false,
+          baseline: '',
+          upperTol: '',
+          lowerTol: '',
+          symmetric: true
+        });
+      }
+      setDatasets(nextDatasets);
+      if (nextDatasets[0]?.id) setActiveDatasetId(nextDatasets[0].id);
+
+      // Immediately execute local query so preset loads and plots instantaneously!
+      runAllQueries({
+        datasets: nextDatasets,
+        yVariable: nextY,
+        xVariable: nextX,
+        selectedTestList: nextList,
+        includeAllInstances: nextIncludeAll
+      }).then(res => {
+        if (res?.needsPull && res?.totalPoints === 0 && status?.qatrack?.configured) {
+          handleFetchFromQATrack({
+            yVariable: nextY,
+            selectedTestList: nextList,
+            includeAllInstances: nextIncludeAll,
+            datasets: nextDatasets
+          });
+        }
+      });
     }
   };
 
@@ -629,6 +758,7 @@ export default function App() {
       } catch (_) {}
 
       if (data.success || data.cancelled) {
+        queryCacheRef.current.clear();
         setIgnoredSessionIds([]);
         await loadMetadata();
         runAllQueries();
@@ -653,62 +783,84 @@ export default function App() {
     }
   };
 
-  // On-Demand Data Retrieval and Loading upon clicking the button
-  const handleRetrieveOnDemand = useCallback(async () => {
+  // Explicit QATrack Fetch / Sync for configured datasets
+  const handleFetchFromQATrack = useCallback(async (options = {}) => {
+    const effectiveY = options.yVariable || yVariable;
+    if (!effectiveY) {
+      alert('Please select a Measurement Variable (Y-Axis) before fetching data from QATrack+.');
+      return;
+    }
+
+    if (!status?.qatrack?.configured) {
+      alert('QATrack+ server is not configured. Configure your QATrack+ URL and API token in Settings.');
+      return;
+    }
+
+    const effectiveTestList = options.selectedTestList !== undefined ? options.selectedTestList : selectedTestList;
+    const effectiveIncludeAll = options.includeAllInstances !== undefined ? options.includeAllInstances : includeAllInstances;
+    const activeDatasets = (options.datasets || datasets).filter(d => d.visible !== false);
+
+    let targetLists = [];
+    if (!effectiveIncludeAll && effectiveTestList) {
+      targetLists = [effectiveTestList];
+    } else if (effectiveTestList) {
+      targetLists = [effectiveTestList];
+    } else {
+      const matchingDefs = tests.filter(t => t.name === effectiveY);
+      targetLists = [...new Set(matchingDefs.map(t => t.testList).filter(Boolean))];
+    }
+
+    // Filter out generic placeholder if specific lists exist
+    if (targetLists.length > 1 && targetLists.includes('General QA')) {
+      targetLists = targetLists.filter(l => l !== 'General QA');
+    }
+
+    // Collect specific units if specified in active datasets (strictly active units only)
+    const specifiedUnits = [...new Set(activeDatasets.flatMap(d => d.units || []))];
+    const activeUnitNames = new Set(units.filter(u => u.active !== 0).map(u => u.name));
+    const allUnits = (specifiedUnits.length > 0 ? specifiedUnits : units.map(u => u.name))
+      .filter(u => activeUnitNames.has(u));
+
+    // Collect date boundaries across active datasets if specified
+    const dateFroms = activeDatasets.map(d => d.dateFrom).filter(Boolean);
+    const dateTos = activeDatasets.map(d => d.dateTo).filter(Boolean);
+    const minDateFrom = dateFroms.length > 0 ? dateFroms.sort()[0] : undefined;
+    const maxDateTo = dateTos.length > 0 ? dateTos.sort().reverse()[0] : undefined;
+
+    // Invalidate in-memory query cache so newly fetched records from QATrack are loaded
+    queryCacheRef.current.clear();
+
+    await handleSync({
+      mode: 'ondemand',
+      testListNames: targetLists,
+      unitNames: allUnits,
+      dateFrom: minDateFrom,
+      dateTo: maxDateTo,
+      yVariable: effectiveY,
+      limit: null
+    });
+  }, [yVariable, status, includeAllInstances, selectedTestList, tests, datasets, units, handleSync]);
+
+  // Query Local Database / In-Memory Cache (Instant Execution)
+  const handleRunLocalQuery = useCallback(async (options = {}) => {
     if (!yVariable) {
-      alert('Please select a Measurement Variable (Y-Axis) before retrieving data.');
+      alert('Please select a Measurement Variable (Y-Axis) before loading data.');
       return;
     }
 
     setIsConfigStale(false);
     setHasLoaded(true);
 
-    if (status?.qatrack?.configured) {
-      let targetLists = [];
-      if (!includeAllInstances && selectedTestList) {
-        targetLists = [selectedTestList];
-      } else if (selectedTestList) {
-        targetLists = [selectedTestList];
-      } else {
-        const matchingDefs = tests.filter(t => t.name === yVariable);
-        targetLists = [...new Set(matchingDefs.map(t => t.testList).filter(Boolean))];
-      }
+    const queryRes = await runAllQueries(options);
 
-      // Filter out generic placeholder if specific lists exist
-      if (targetLists.length > 1 && targetLists.includes('General QA')) {
-        targetLists = targetLists.filter(l => l !== 'General QA');
-      }
-
-      // Collect specific units if specified in active datasets (strictly active units only)
-      const activeDatasets = datasets.filter(d => d.visible !== false);
-      const specifiedUnits = [...new Set(activeDatasets.flatMap(d => d.units || []))];
-      const activeUnitNames = new Set(units.filter(u => u.active !== 0).map(u => u.name));
-      const allUnits = (specifiedUnits.length > 0 ? specifiedUnits : units.map(u => u.name))
-        .filter(u => activeUnitNames.has(u));
-
-      // Collect date boundaries across active datasets if specified
-      const dateFroms = activeDatasets.map(d => d.dateFrom).filter(Boolean);
-      const dateTos = activeDatasets.map(d => d.dateTo).filter(Boolean);
-      const minDateFrom = dateFroms.length > 0 ? dateFroms.sort()[0] : undefined;
-      const maxDateTo = dateTos.length > 0 ? dateTos.sort().reverse()[0] : undefined;
-
-      await handleSync({
-        mode: 'ondemand',
-        testListNames: targetLists,
-        unitNames: allUnits,
-        dateFrom: minDateFrom,
-        dateTo: maxDateTo,
-        yVariable,
-        limit: null
-      });
-    } else {
-      await runAllQueries();
+    // If local database has 0 records for this variable and needsPull is true, auto-retrieve from QATrack if configured
+    if (queryRes && queryRes.totalPoints === 0 && queryRes.needsPull && status?.qatrack?.configured) {
+      await handleFetchFromQATrack(options);
     }
+  }, [yVariable, runAllQueries, status, handleFetchFromQATrack]);
 
-    loadedConfigRef.current = getConfigSnapshot();
-    setIsConfigStale(false);
-    setHasLoaded(true);
-  }, [status, includeAllInstances, selectedTestList, tests, yVariable, xVariable, datasets, handleSync, runAllQueries, getConfigSnapshot]);
+  // Alias for backward compatibility
+  const handleRetrieveOnDemand = handleRunLocalQuery;
 
   // Clear All Data
   const handleClearData = async () => {
@@ -718,6 +870,7 @@ export default function App() {
         const res = await fetch('/api/clear-data', { method: 'POST' });
         const data = await res.json();
         if (data.success) {
+          queryCacheRef.current.clear();
           setIgnoredSessionIds([]);
           setDatasetResults({});
           setHasLoaded(false);
@@ -748,6 +901,7 @@ export default function App() {
       });
       const data = await res.json();
       if (data.success) {
+        queryCacheRef.current.clear();
         await loadMetadata();
         const demoDsId = `ds-${Date.now()}`;
         const demoDatasets = [
@@ -824,7 +978,8 @@ export default function App() {
     selectedTestList,
     includeAllInstances,
     displayMode,
-    trendlineConfig
+    trendlineConfig,
+    baselineConfig
   };
 
   return (
@@ -836,9 +991,7 @@ export default function App() {
         onSelectPreset={handleSelectPreset}
         onOpenSettings={() => setIsSettingsOpen(true)}
         onOpenSavePreset={() => setIsSavePresetOpen(true)}
-        onOpenImportPreset={() => setIsImportPresetOpen(true)}
-        onExportPreset={handleExportPresets}
-        onDeletePreset={handleDeletePreset}
+        onOpenPresetManager={() => setIsPresetManagerOpen(true)}
         onSync={handleSync}
         onClearData={handleClearData}
         onNewAnalysis={handleNewAnalysis}
@@ -878,7 +1031,9 @@ export default function App() {
           onChangeDisplayMode={setDisplayMode}
           trendlineConfig={trendlineConfig}
           onChangeTrendlineConfig={setTrendlineConfig}
-          onRetrieveData={handleRetrieveOnDemand}
+          onRetrieveData={handleRunLocalQuery}
+          onRunLocalQuery={handleRunLocalQuery}
+          onFetchFromQATrack={handleFetchFromQATrack}
           onLoadDemoData={handleLoadDemoData}
           isLoading={isLoading || isSyncing}
           totalLoadedRecords={combinedTableRows.length}
@@ -943,11 +1098,15 @@ export default function App() {
               yVariable={yVariable}
               displayMode={displayMode}
               trendlineConfig={trendlineConfig}
+              baselineConfig={baselineConfig}
+              onChangeBaselineConfig={setBaselineConfig}
               ignoredSessionIds={ignoredSessionIds}
               onIgnorePoint={handleIgnorePoint}
               onRestoreAllIgnored={handleRestoreAllIgnored}
               hasLoaded={hasLoaded}
-              onRetrieveData={handleRetrieveOnDemand}
+              onRetrieveData={handleRunLocalQuery}
+              onRunLocalQuery={handleRunLocalQuery}
+              onFetchFromQATrack={handleFetchFromQATrack}
             />
 
             {/* Bottom Comparative Benchmarking Table */}
@@ -958,6 +1117,7 @@ export default function App() {
               yVariable={yVariable}
               xVariable={xVariable}
               trendlineConfig={trendlineConfig}
+              baselineConfig={baselineConfig}
             />
           </>
         ) : (
@@ -987,10 +1147,13 @@ export default function App() {
         activePresetId={selectedPresetId}
       />
 
-      <PresetImportModal
-        isOpen={isImportPresetOpen}
-        onClose={() => setIsImportPresetOpen(false)}
-        onImportSuccess={handleImportSuccess}
+      <PresetManagerModal
+        isOpen={isPresetManagerOpen}
+        onClose={() => setIsPresetManagerOpen(false)}
+        presets={presets}
+        selectedPresetId={selectedPresetId}
+        onSelectPreset={handleSelectPreset}
+        onPresetsUpdated={loadMetadata}
       />
 
       <SyncProgressModal

@@ -538,11 +538,14 @@ router.post('/query', async (req, res) => {
     if (sessions.length === 0) {
       return res.json({
         totalSessions: 0,
+        matchedPoints: 0,
         dataPoints: [],
         xStats: calculateStats([]),
         yStats: calculateStats([]),
         grouped: {},
-        tableRows: []
+        tableRows: [],
+        needsPull,
+        targetLists
       });
     }
 
@@ -675,10 +678,10 @@ router.post('/query', async (req, res) => {
   }
 });
 
-// 10. Presets Management
+// 9. Presets Management (Sorted by custom order_index)
 router.get('/presets', (req, res) => {
   try {
-    const presets = db.prepare('SELECT * FROM presets ORDER BY updated_at DESC').all();
+    const presets = db.prepare('SELECT * FROM presets ORDER BY order_index ASC, id ASC').all();
     const parsed = presets.map(p => ({
       ...p,
       config: JSON.parse(p.config_json)
@@ -695,12 +698,39 @@ router.post('/presets', (req, res) => {
     if (!name || !config) {
       return res.status(400).json({ error: 'Name and config are required.' });
     }
+    const maxOrderRow = db.prepare('SELECT COALESCE(MAX(order_index), 0) as maxOrder FROM presets').get();
+    const nextOrder = (maxOrderRow?.maxOrder || 0) + 1;
     const insert = db.prepare(`
-      INSERT INTO presets (name, description, config_json, updated_at)
-      VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+      INSERT INTO presets (name, description, config_json, order_index, updated_at)
+      VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
     `);
-    const info = insert.run(name, description || '', JSON.stringify(config));
+    const info = insert.run(name, description || '', JSON.stringify(config), nextOrder);
     res.json({ success: true, id: info.lastInsertRowid });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Reorder presets
+router.put('/presets/reorder', (req, res) => {
+  try {
+    const { orderedIds } = req.body;
+    if (!Array.isArray(orderedIds)) {
+      return res.status(400).json({ error: 'orderedIds array is required.' });
+    }
+    const updateOrder = db.prepare('UPDATE presets SET order_index = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?');
+    const reorderTx = db.transaction((ids) => {
+      ids.forEach((id, idx) => {
+        updateOrder.run(idx + 1, id);
+      });
+    });
+    reorderTx(orderedIds);
+
+    const allPresets = db.prepare('SELECT * FROM presets ORDER BY order_index ASC, id ASC').all().map(p => ({
+      ...p,
+      config: JSON.parse(p.config_json)
+    }));
+    res.json({ success: true, presets: allPresets });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -757,7 +787,7 @@ router.get('/presets/export', (req, res) => {
       const safeName = (row.name || 'preset').replace(/[^a-zA-Z0-9_-]/g, '_').toLowerCase();
       filename = `qadence_preset_${safeName}.json`;
     } else {
-      presetRows = db.prepare('SELECT * FROM presets ORDER BY name ASC').all();
+      presetRows = db.prepare('SELECT * FROM presets ORDER BY order_index ASC, id ASC').all();
       const dateStr = new Date().toISOString().split('T')[0];
       filename = `qadence_presets_${dateStr}.json`;
     }
@@ -816,9 +846,12 @@ router.post('/presets/import', (req, res) => {
       SET description = ?, config_json = ?, updated_at = CURRENT_TIMESTAMP 
       WHERE id = ?
     `);
+
+    const maxOrderRow = db.prepare('SELECT COALESCE(MAX(order_index), 0) as maxOrder FROM presets').get();
+    let currentOrder = maxOrderRow?.maxOrder || 0;
     const insertStmt = db.prepare(`
-      INSERT INTO presets (name, description, config_json, updated_at) 
-      VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+      INSERT INTO presets (name, description, config_json, order_index, updated_at) 
+      VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
     `);
 
     let importedCount = 0;
@@ -858,7 +891,8 @@ router.post('/presets/import', (req, res) => {
             }
             finalName = `${rawName} (Imported${suffix > 1 ? ` ${suffix}` : ''})`;
           }
-          const info = insertStmt.run(finalName, description, configJson);
+          currentOrder++;
+          const info = insertStmt.run(finalName, description, configJson, currentOrder);
           importedCount++;
           processedPresets.push({ id: info.lastInsertRowid, name: finalName, action: 'imported' });
         }
@@ -867,7 +901,7 @@ router.post('/presets/import', (req, res) => {
 
     importTx();
 
-    const allPresets = db.prepare('SELECT * FROM presets ORDER BY updated_at DESC').all().map(p => ({
+    const allPresets = db.prepare('SELECT * FROM presets ORDER BY order_index ASC, id ASC').all().map(p => ({
       ...p,
       config: JSON.parse(p.config_json)
     }));

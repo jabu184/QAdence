@@ -6,12 +6,43 @@ export default function BoxWhiskerPlot({
   datasets = [],
   datasetResults = {},
   ignoredSessionIds = [],
-  yVariable
+  yVariable,
+  baselineConfig
 }) {
   const [hoveredData, setHoveredData] = useState(null);
   const [tooltipPos, setTooltipPos] = useState({ x: 0, y: 0 });
 
   const ignoredSet = useMemo(() => new Set(ignoredSessionIds), [ignoredSessionIds]);
+
+  // Baseline & Tolerance parsed configuration
+  const baselineInfo = useMemo(() => {
+    if (!baselineConfig || !baselineConfig.enabled) return null;
+    const bVal = baselineConfig.baseline !== '' && baselineConfig.baseline !== undefined && !isNaN(Number(baselineConfig.baseline))
+      ? parseFloat(baselineConfig.baseline)
+      : null;
+    if (bVal === null) return null;
+
+    const uTol = baselineConfig.upperTol !== '' && baselineConfig.upperTol !== undefined && !isNaN(Number(baselineConfig.upperTol))
+      ? Math.abs(parseFloat(baselineConfig.upperTol))
+      : null;
+
+    const lTol = baselineConfig.symmetric !== false
+      ? uTol
+      : (baselineConfig.lowerTol !== '' && baselineConfig.lowerTol !== undefined && !isNaN(Number(baselineConfig.lowerTol))
+          ? Math.abs(parseFloat(baselineConfig.lowerTol))
+          : null);
+
+    const upperLimit = uTol !== null ? bVal + uTol : null;
+    const lowerLimit = lTol !== null ? bVal - lTol : null;
+
+    return {
+      baseline: bVal,
+      upperTol: uTol,
+      lowerTol: lTol,
+      upperLimit,
+      lowerLimit
+    };
+  }, [baselineConfig]);
 
   // Compute boxplot statistics for each visible dataset
   const boxData = useMemo(() => {
@@ -45,6 +76,17 @@ export default function BoxWhiskerPlot({
       }
     });
 
+    if (baselineInfo) {
+      if (baselineInfo.baseline < min) min = baselineInfo.baseline;
+      if (baselineInfo.baseline > max) max = baselineInfo.baseline;
+      if (baselineInfo.upperLimit !== null && baselineInfo.upperLimit > max) {
+        max = baselineInfo.upperLimit;
+      }
+      if (baselineInfo.lowerLimit !== null && baselineInfo.lowerLimit < min) {
+        min = baselineInfo.lowerLimit;
+      }
+    }
+
     if (min === max) {
       min -= 1;
       max += 1;
@@ -54,7 +96,7 @@ export default function BoxWhiskerPlot({
       globalMin: min - pad,
       globalMax: max + pad
     };
-  }, [boxData]);
+  }, [boxData, baselineInfo]);
 
   if (boxData.length === 0) return null;
 
@@ -105,7 +147,7 @@ export default function BoxWhiskerPlot({
         </div>
 
         {/* Legend pills */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: '10px', fontSize: '0.76rem', color: '#64748b' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '10px', fontSize: '0.76rem', color: '#64748b', flexWrap: 'wrap' }}>
           <span style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
             <span style={{ width: '10px', height: '10px', border: '1.5px solid #2563eb', background: '#eff6ff', display: 'inline-block' }} />
             IQR (Q1 - Q3)
@@ -122,6 +164,20 @@ export default function BoxWhiskerPlot({
             <span style={{ width: '6px', height: '6px', borderRadius: '50%', background: '#dc2626', display: 'inline-block' }} />
             Outlier (1.5×IQR)
           </span>
+          {baselineInfo && (
+            <>
+              <span style={{ display: 'flex', alignItems: 'center', gap: '4px', color: '#059669', fontWeight: '600' }}>
+                <span style={{ width: '12px', height: '0px', borderTop: '2px dashed #10b981', display: 'inline-block' }} />
+                Baseline ({baselineInfo.baseline})
+              </span>
+              {(baselineInfo.upperLimit !== null || baselineInfo.lowerLimit !== null) && (
+                <span style={{ display: 'flex', alignItems: 'center', gap: '4px', color: '#b45309', fontWeight: '600' }}>
+                  <span style={{ width: '12px', height: '0px', borderTop: '2px dashed #f59e0b', display: 'inline-block' }} />
+                  Tol ({baselineInfo.lowerLimit !== null ? baselineInfo.lowerLimit : '—'} to {baselineInfo.upperLimit !== null ? baselineInfo.upperLimit : '—'})
+                </span>
+              )}
+            </>
+          )}
         </div>
       </div>
 
@@ -181,6 +237,108 @@ export default function BoxWhiskerPlot({
             stroke="#cbd5e1"
             strokeWidth="1.5"
           />
+
+          {/* Baseline & Tolerance Limit Overlays */}
+          {baselineInfo && (
+            <g>
+              {/* Shaded tolerance band (green acceptable region) */}
+              {(baselineInfo.upperLimit !== null || baselineInfo.lowerLimit !== null) && (
+                <rect
+                  x={margin.left}
+                  y={Math.min(
+                    getY(baselineInfo.upperLimit !== null ? baselineInfo.upperLimit : baselineInfo.baseline),
+                    getY(baselineInfo.lowerLimit !== null ? baselineInfo.lowerLimit : baselineInfo.baseline)
+                  )}
+                  width={plotWidth}
+                  height={Math.max(
+                    1,
+                    Math.abs(
+                      getY(baselineInfo.lowerLimit !== null ? baselineInfo.lowerLimit : baselineInfo.baseline) -
+                      getY(baselineInfo.upperLimit !== null ? baselineInfo.upperLimit : baselineInfo.baseline)
+                    )
+                  )}
+                  fill="#10b981"
+                  fillOpacity="0.10"
+                />
+              )}
+
+              {/* Upper Tolerance Line */}
+              {baselineInfo.upperLimit !== null && (
+                <g>
+                  <line
+                    x1={margin.left}
+                    y1={getY(baselineInfo.upperLimit)}
+                    x2={width - margin.right}
+                    y2={getY(baselineInfo.upperLimit)}
+                    stroke="#f59e0b"
+                    strokeWidth="1.5"
+                    strokeDasharray="4,4"
+                  />
+                  <text
+                    x={width - margin.right - 6}
+                    y={getY(baselineInfo.upperLimit) - 4}
+                    textAnchor="end"
+                    fontSize="10"
+                    fill="#b45309"
+                    fontWeight="600"
+                    fontFamily="sans-serif"
+                  >
+                    +Tol: {baselineInfo.upperLimit}
+                  </text>
+                </g>
+              )}
+
+              {/* Lower Tolerance Line */}
+              {baselineInfo.lowerLimit !== null && (
+                <g>
+                  <line
+                    x1={margin.left}
+                    y1={getY(baselineInfo.lowerLimit)}
+                    x2={width - margin.right}
+                    y2={getY(baselineInfo.lowerLimit)}
+                    stroke="#f59e0b"
+                    strokeWidth="1.5"
+                    strokeDasharray="4,4"
+                  />
+                  <text
+                    x={width - margin.right - 6}
+                    y={getY(baselineInfo.lowerLimit) + 11}
+                    textAnchor="end"
+                    fontSize="10"
+                    fill="#b45309"
+                    fontWeight="600"
+                    fontFamily="sans-serif"
+                  >
+                    -Tol: {baselineInfo.lowerLimit}
+                  </text>
+                </g>
+              )}
+
+              {/* Baseline Reference Line */}
+              <g>
+                <line
+                  x1={margin.left}
+                  y1={getY(baselineInfo.baseline)}
+                  x2={width - margin.right}
+                  y2={getY(baselineInfo.baseline)}
+                  stroke="#10b981"
+                  strokeWidth="2"
+                  strokeDasharray="6,4"
+                />
+                <text
+                  x={margin.left + 8}
+                  y={getY(baselineInfo.baseline) - 4}
+                  textAnchor="start"
+                  fontSize="10"
+                  fill="#059669"
+                  fontWeight="700"
+                  fontFamily="sans-serif"
+                >
+                  Baseline: {baselineInfo.baseline}
+                </text>
+              </g>
+            </g>
+          )}
 
           {/* Render each dataset's Box and Whisker */}
           {boxData.map(({ dataset, stats }, idx) => {

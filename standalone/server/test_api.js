@@ -135,11 +135,28 @@ const server = app.listen(5099, async () => {
       throw new Error('Unit and conditional filter scoping failed.');
     }
 
+    console.log('Testing local query needsPull and caching indicators...');
+    if (allInstancesRes.data.needsPull !== false) {
+      throw new Error(`Expected needsPull to be false for existing local variable, got ${allInstancesRes.data.needsPull}`);
+    }
+    const nonExistentRes = await axios.post(`${base}/query`, {
+      yVariable: 'Non Existent Test Variable 999',
+      includeAllInstances: true
+    });
+    if (nonExistentRes.data.matchedPoints !== 0) {
+      throw new Error('Expected 0 matchedPoints for non-existent variable');
+    }
+    console.log('Verified: local query correctly isolates local variables and returns 0 matched points when variable is not in dataset!');
+
     console.log('Testing /api/presets CRUD (create, overwrite/PUT, delete)...');
     const createRes = await axios.post(`${base}/presets`, {
       name: 'Test Preset Temp',
       description: 'Initial description',
-      config: { xVariable: 'work_completed', yVariable: 'pressure' }
+      config: {
+        xVariable: 'work_completed',
+        yVariable: 'pressure',
+        baselineConfig: { enabled: true, baseline: '100', upperTol: '3', lowerTol: '3', symmetric: true }
+      }
     });
     const createdId = createRes.data.id;
     if (!createdId) throw new Error('Failed to create preset');
@@ -148,13 +165,21 @@ const server = app.listen(5099, async () => {
     await axios.put(`${base}/presets/${createdId}`, {
       name: 'Test Preset Updated',
       description: 'Updated description',
-      config: { xVariable: 'work_completed', yVariable: 'pass_rate_pct' }
+      config: {
+        xVariable: 'work_completed',
+        yVariable: 'pass_rate_pct',
+        baselineConfig: { enabled: true, baseline: '98.5', upperTol: '2', lowerTol: '1.5', symmetric: false }
+      }
     });
 
     const getRes = await axios.get(`${base}/presets`);
     const updated = getRes.data.find(p => p.id === createdId);
     if (!updated || updated.name !== 'Test Preset Updated' || updated.description !== 'Updated description') {
       throw new Error('Preset PUT overwrite failed');
+    }
+    const parsedConfig = JSON.parse(updated.config_json);
+    if (!parsedConfig.baselineConfig || parsedConfig.baselineConfig.baseline !== '98.5' || parsedConfig.baselineConfig.upperTol !== '2') {
+      throw new Error('Preset baselineConfig was not persisted correctly in preset config');
     }
 
     // Test DELETE
@@ -242,6 +267,50 @@ const server = app.listen(5099, async () => {
     db.prepare('DELETE FROM presets WHERE id IN (?, ?)').run(p1, p2);
     db.prepare('DELETE FROM presets WHERE id = ?').run(importedRow.id);
     console.log('Preset export and import verified successfully!');
+
+    console.log('Testing /api/presets/reorder and metadata editing...');
+    const r1 = db.prepare(`
+      INSERT INTO presets (name, description, config_json, order_index)
+      VALUES (?, ?, ?, ?)
+    `).run('Order First', 'Desc 1', JSON.stringify({ yVariable: 'v1' }), 1).lastInsertRowid;
+    const r2 = db.prepare(`
+      INSERT INTO presets (name, description, config_json, order_index)
+      VALUES (?, ?, ?, ?)
+    `).run('Order Second', 'Desc 2', JSON.stringify({ yVariable: 'v2' }), 2).lastInsertRowid;
+    const r3 = db.prepare(`
+      INSERT INTO presets (name, description, config_json, order_index)
+      VALUES (?, ?, ?, ?)
+    `).run('Order Third', 'Desc 3', JSON.stringify({ yVariable: 'v3' }), 3).lastInsertRowid;
+
+    // Test reverse reorder: [r3, r1, r2]
+    const reorderRes = await axios.put(`${base}/presets/reorder`, {
+      orderedIds: [r3, r1, r2]
+    });
+    if (!reorderRes.data.success || !Array.isArray(reorderRes.data.presets)) {
+      throw new Error('Reorder presets endpoint failed');
+    }
+    const returnedPresets = reorderRes.data.presets;
+    if (returnedPresets[0].id !== r3 || returnedPresets[1].id !== r1 || returnedPresets[2].id !== r2) {
+      throw new Error(`Reorder failed: expected [${r3}, ${r1}, ${r2}], got [${returnedPresets.map(p => p.id).join(', ')}]`);
+    }
+
+    // Test editing name and description only
+    await axios.put(`${base}/presets/${r1}`, {
+      name: 'Renamed Order First',
+      description: 'Edited description only'
+    });
+    const editedPreset = db.prepare('SELECT * FROM presets WHERE id = ?').get(r1);
+    if (editedPreset.name !== 'Renamed Order First' || editedPreset.description !== 'Edited description only') {
+      throw new Error('Editing name/description failed');
+    }
+    const editedConfig = JSON.parse(editedPreset.config_json);
+    if (editedConfig.yVariable !== 'v1') {
+      throw new Error('Config was corrupted during metadata edit');
+    }
+
+    // Clean up test rows
+    db.prepare('DELETE FROM presets WHERE id IN (?, ?, ?)').run(r1, r2, r3);
+    console.log('Preset reorder and metadata editing verified successfully!');
 
     console.log('Testing /api/analysis/correlation with Python backend...');
     const corrRes = await axios.post(`${base}/analysis/correlation`, {

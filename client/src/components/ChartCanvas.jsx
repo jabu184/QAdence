@@ -13,8 +13,14 @@ import {
   Filler
 } from 'chart.js';
 import { Scatter, Line, Bar } from 'react-chartjs-2';
-import { Download, EyeOff, RotateCcw, AlertCircle, Activity, RefreshCw } from 'lucide-react';
-import { computeLinearRegression, computeMovingAverage, computePolynomialRegression } from '../utils/math';
+import { Download, EyeOff, RotateCcw, AlertCircle, Activity, RefreshCw, Target } from 'lucide-react';
+import {
+  computeLinearRegression,
+  computeMovingAverage,
+  computePolynomialRegression,
+  computeNormalDistribution,
+  generateForecastPoints
+} from '../utils/math';
 
 ChartJS.register(
   CategoryScale,
@@ -34,8 +40,10 @@ export default function ChartCanvas({
   datasetResults = {},
   xVariable,
   yVariable,
-  displayMode = 'scatter', // 'scatter', 'line', 'distribution'
+  displayMode = 'scatter', // 'scatter', 'line', 'distribution', 'normal'
   trendlineConfig = { enabled: false, type: 'linear', windowSize: 5 },
+  baselineConfig = { enabled: false, baseline: '', upperTol: '', lowerTol: '', symmetric: true },
+  onChangeBaselineConfig,
   ignoredSessionIds = [],
   onIgnorePoint,
   onRestoreAllIgnored,
@@ -75,6 +83,94 @@ export default function ChartCanvas({
     return Object.values(activeDatasetData).reduce((sum, pts) => sum + pts.length, 0);
   }, [activeDatasetData]);
 
+  // Baseline & Tolerance parsed configuration
+  const baselineInfo = useMemo(() => {
+    if (!baselineConfig || !baselineConfig.enabled) return null;
+    const bVal = baselineConfig.baseline !== '' && baselineConfig.baseline !== undefined && !isNaN(Number(baselineConfig.baseline))
+      ? parseFloat(baselineConfig.baseline)
+      : null;
+    if (bVal === null) return null;
+
+    const uTol = baselineConfig.upperTol !== '' && baselineConfig.upperTol !== undefined && !isNaN(Number(baselineConfig.upperTol))
+      ? Math.abs(parseFloat(baselineConfig.upperTol))
+      : null;
+
+    const lTol = baselineConfig.symmetric !== false
+      ? uTol
+      : (baselineConfig.lowerTol !== '' && baselineConfig.lowerTol !== undefined && !isNaN(Number(baselineConfig.lowerTol))
+          ? Math.abs(parseFloat(baselineConfig.lowerTol))
+          : null);
+
+    const upperLimit = uTol !== null ? bVal + uTol : null;
+    const lowerLimit = lTol !== null ? bVal - lTol : null;
+
+    return {
+      baseline: bVal,
+      upperTol: uTol,
+      lowerTol: lTol,
+      upperLimit,
+      lowerLimit
+    };
+  }, [baselineConfig]);
+
+  // Chart.js Canvas plugin for horizontal shaded tolerance band (Scatter/Line)
+  const horizontalToleranceBandPlugin = useMemo(() => {
+    if (!baselineInfo || (baselineInfo.upperLimit === null && baselineInfo.lowerLimit === null)) {
+      return null;
+    }
+    const topVal = baselineInfo.upperLimit !== null ? baselineInfo.upperLimit : baselineInfo.baseline;
+    const bottomVal = baselineInfo.lowerLimit !== null ? baselineInfo.lowerLimit : baselineInfo.baseline;
+
+    return {
+      id: 'horizontalToleranceBand',
+      beforeDatasetsDraw: (chart) => {
+        const { ctx, chartArea, scales } = chart;
+        const yScale = scales?.y;
+        if (!ctx || !chartArea || !yScale) return;
+
+        const topPixel = yScale.getPixelForValue(topVal);
+        const bottomPixel = yScale.getPixelForValue(bottomVal);
+
+        const y = Math.min(topPixel, bottomPixel);
+        const height = Math.abs(bottomPixel - topPixel);
+
+        ctx.save();
+        ctx.fillStyle = 'rgba(16, 185, 129, 0.10)'; // green shaded area if < tolerance level
+        ctx.fillRect(chartArea.left, y, chartArea.right - chartArea.left, height);
+        ctx.restore();
+      }
+    };
+  }, [baselineInfo]);
+
+  // Chart.js Canvas plugin for vertical shaded tolerance band (Normal Distribution)
+  const verticalToleranceBandPlugin = useMemo(() => {
+    if (!baselineInfo || (baselineInfo.upperLimit === null && baselineInfo.lowerLimit === null)) {
+      return null;
+    }
+    const leftVal = baselineInfo.lowerLimit !== null ? baselineInfo.lowerLimit : baselineInfo.baseline;
+    const rightVal = baselineInfo.upperLimit !== null ? baselineInfo.upperLimit : baselineInfo.baseline;
+
+    return {
+      id: 'verticalToleranceBand',
+      beforeDatasetsDraw: (chart) => {
+        const { ctx, chartArea, scales } = chart;
+        const xScale = scales?.x;
+        if (!ctx || !chartArea || !xScale) return;
+
+        const leftPixel = xScale.getPixelForValue(leftVal);
+        const rightPixel = xScale.getPixelForValue(rightVal);
+
+        const x = Math.min(leftPixel, rightPixel);
+        const width = Math.abs(rightPixel - leftPixel);
+
+        ctx.save();
+        ctx.fillStyle = 'rgba(16, 185, 129, 0.10)'; // green shaded area if < tolerance level
+        ctx.fillRect(x, chartArea.top, width, chartArea.bottom - chartArea.top);
+        ctx.restore();
+      }
+    };
+  }, [baselineInfo]);
+
   const handleContextMenu = (e) => {
     e.preventDefault();
     const chart = chartRef.current;
@@ -109,19 +205,6 @@ export default function ChartCanvas({
       a.click();
     }
   };
-
-  if (visibleDatasets.length === 0 || totalActivePoints === 0) {
-    return (
-      <div className="card" style={{ padding: '3rem', textAlign: 'center', color: '#64748b' }}>
-        <div style={{ fontSize: '1.1rem', fontWeight: '600', color: '#1e293b', marginBottom: '0.5rem' }}>
-          No Matching Patient QA Data Points in Selected Datasets
-        </div>
-        <p style={{ fontSize: '0.85rem' }}>
-          Check your active dataset scopes, units, time windows, or conditional filters.
-        </p>
-      </div>
-    );
-  }
 
   const isDateX = !xVariable || xVariable === 'work_completed';
 
@@ -182,14 +265,157 @@ export default function ChartCanvas({
     };
 
     chartComponent = <Bar ref={chartRef} data={barData} options={barOptions} />;
+  } else if (displayMode === 'normal') {
+    // Multi-Dataset Normal Distribution (Gaussian Bell Curve)
+    const normalDatasets = [];
+    let minNormX = Infinity;
+    let maxNormX = -Infinity;
+    let maxDensity = 0;
+
+    const computedDistributions = visibleDatasets.map(ds => {
+      const pts = activeDatasetData[ds.id] || [];
+      const yVals = pts.map(p => p.y);
+      const norm = computeNormalDistribution(yVals);
+      if (norm) {
+        const dsMin = norm.mean - 3.5 * norm.stdDev;
+        const dsMax = norm.mean + 3.5 * norm.stdDev;
+        if (dsMin < minNormX) minNormX = dsMin;
+        if (dsMax > maxNormX) maxNormX = dsMax;
+        const peak = norm.pdf(norm.mean);
+        if (peak > maxDensity) maxDensity = peak;
+      }
+      return { ds, norm };
+    });
+
+    if (baselineInfo) {
+      if (baselineInfo.baseline < minNormX) minNormX = baselineInfo.baseline;
+      if (baselineInfo.baseline > maxNormX) maxNormX = baselineInfo.baseline;
+      if (baselineInfo.lowerLimit !== null && baselineInfo.lowerLimit < minNormX) minNormX = baselineInfo.lowerLimit;
+      if (baselineInfo.upperLimit !== null && baselineInfo.upperLimit > maxNormX) maxNormX = baselineInfo.upperLimit;
+    }
+
+    if (minNormX === Infinity || maxNormX === -Infinity || minNormX === maxNormX) {
+      minNormX = 0;
+      maxNormX = 1;
+    }
+
+    const span = maxNormX - minNormX || 1;
+    const domainMin = minNormX - span * 0.05;
+    const domainMax = maxNormX + span * 0.05;
+
+    computedDistributions.forEach(({ ds, norm }) => {
+      if (!norm) return;
+      const curvePoints = [];
+      const steps = 100;
+      const step = (domainMax - domainMin) / (steps - 1);
+      for (let i = 0; i < steps; i++) {
+        const x = domainMin + i * step;
+        curvePoints.push({
+          x: Math.round(x * 1000) / 1000,
+          y: norm.pdf(x)
+        });
+      }
+
+      normalDatasets.push({
+        label: `${ds.name} (μ=${norm.mean}, σ=${norm.stdDev})`,
+        data: curvePoints,
+        borderColor: ds.color || '#2563eb',
+        backgroundColor: ds.color ? `${ds.color}20` : 'rgba(37, 99, 235, 0.12)',
+        fill: true,
+        showLine: true,
+        borderWidth: 2,
+        pointRadius: 0,
+        pointHoverRadius: 4,
+        tension: 0.3
+      });
+    });
+
+    if (baselineInfo) {
+      const maxY = (maxDensity || 1) * 1.15;
+      normalDatasets.push({
+        label: `Baseline (${baselineInfo.baseline})`,
+        data: [{ x: baselineInfo.baseline, y: 0 }, { x: baselineInfo.baseline, y: maxY }],
+        borderColor: '#10b981',
+        borderWidth: 2,
+        borderDash: [6, 4],
+        pointRadius: 0,
+        pointHoverRadius: 0,
+        showLine: true,
+        fill: false
+      });
+
+      if (baselineInfo.upperLimit !== null) {
+        normalDatasets.push({
+          label: `+Tol (${baselineInfo.upperLimit})`,
+          data: [{ x: baselineInfo.upperLimit, y: 0 }, { x: baselineInfo.upperLimit, y: maxY }],
+          borderColor: '#f59e0b',
+          borderWidth: 1.5,
+          borderDash: [4, 4],
+          pointRadius: 0,
+          pointHoverRadius: 0,
+          showLine: true,
+          fill: false
+        });
+      }
+
+      if (baselineInfo.lowerLimit !== null) {
+        normalDatasets.push({
+          label: `-Tol (${baselineInfo.lowerLimit})`,
+          data: [{ x: baselineInfo.lowerLimit, y: 0 }, { x: baselineInfo.lowerLimit, y: maxY }],
+          borderColor: '#f59e0b',
+          borderWidth: 1.5,
+          borderDash: [4, 4],
+          pointRadius: 0,
+          pointHoverRadius: 0,
+          showLine: true,
+          fill: false
+        });
+      }
+    }
+
+    const normalOptions = {
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: {
+        legend: { position: 'top' },
+        tooltip: {
+          callbacks: {
+            title: (items) => `${yVariable}: ${items[0].raw?.x}`,
+            label: (item) => `${item.dataset.label}: density ${Number(item.raw?.y).toFixed(4)}`
+          }
+        }
+      },
+      scales: {
+        x: {
+          type: 'linear',
+          title: { display: true, text: `${yVariable} Value` }
+        },
+        y: {
+          type: 'linear',
+          beginAtZero: true,
+          title: { display: true, text: 'Probability Density' }
+        }
+      }
+    };
+
+    chartComponent = (
+      <Line
+        ref={chartRef}
+        data={{ datasets: normalDatasets }}
+        options={normalOptions}
+        plugins={verticalToleranceBandPlugin ? [verticalToleranceBandPlugin] : []}
+      />
+    );
   } else {
     // Scatter or Line Plot
     const isLineMode = displayMode === 'line';
     const chartDatasets = [];
+    const allXValues = [];
 
     visibleDatasets.forEach(ds => {
       const pts = activeDatasetData[ds.id] || [];
       const sortedPts = [...pts].sort((a, b) => a.x - b.x);
+      sortedPts.forEach(p => allXValues.push(p.x));
 
       // 1. Primary Data Series
       chartDatasets.push({
@@ -238,6 +464,29 @@ export default function ChartCanvas({
               showLine: true,
               fill: false
             });
+
+            // Linear Trend Forecast
+            if (trendlineConfig.forecastEnabled && Number(trendlineConfig.forecastValue) > 0) {
+              const fVal = Number(trendlineConfig.forecastValue);
+              const fUnit = trendlineConfig.forecastUnit || 'days';
+              const msPerDay = 24 * 60 * 60 * 1000;
+              const forecastDelta = isDateX ? (fUnit === 'months' ? fVal * 30.4375 : fVal) * msPerDay : fVal;
+              const forecastPts = generateForecastPoints(reg, lastPt.x, forecastDelta, 20);
+              if (forecastPts.length > 0) {
+                chartDatasets.push({
+                  label: `${ds.name} Forecast (+${fVal} ${fUnit})`,
+                  data: forecastPts,
+                  borderColor: ds.color || '#2563eb',
+                  borderDash: [2, 4],
+                  borderWidth: 2,
+                  pointRadius: 0,
+                  pointHoverRadius: 0,
+                  showLine: true,
+                  fill: false
+                });
+                allXValues.push(forecastPts[forecastPts.length - 1].x);
+              }
+            }
           }
         } else if (trendlineConfig.type === 'polynomial') {
           const order = trendlineConfig.order || 2;
@@ -255,6 +504,30 @@ export default function ChartCanvas({
               tension: 0.15,
               fill: false
             });
+
+            // Polynomial Trend Forecast
+            if (trendlineConfig.forecastEnabled && Number(trendlineConfig.forecastValue) > 0) {
+              const fVal = Number(trendlineConfig.forecastValue);
+              const fUnit = trendlineConfig.forecastUnit || 'days';
+              const msPerDay = 24 * 60 * 60 * 1000;
+              const forecastDelta = isDateX ? (fUnit === 'months' ? fVal * 30.4375 : fVal) * msPerDay : fVal;
+              const lastPt = sortedPts[sortedPts.length - 1];
+              const forecastPts = generateForecastPoints(poly, lastPt.x, forecastDelta, 25);
+              if (forecastPts.length > 0) {
+                chartDatasets.push({
+                  label: `${ds.name} Poly Forecast (+${fVal} ${fUnit})`,
+                  data: forecastPts,
+                  borderColor: ds.color || '#2563eb',
+                  borderDash: [2, 4],
+                  borderWidth: 2,
+                  pointRadius: 0,
+                  pointHoverRadius: 0,
+                  showLine: true,
+                  fill: false
+                });
+                allXValues.push(forecastPts[forecastPts.length - 1].x);
+              }
+            }
           }
         } else if (trendlineConfig.type === 'moving_average') {
           const k = trendlineConfig.windowSize || 5;
@@ -278,6 +551,52 @@ export default function ChartCanvas({
         }
       }
     });
+
+    // 3. Baseline & Tolerance Limit Overlays (if enabled)
+    if (baselineInfo && allXValues.length > 0) {
+      const minX = Math.min(...allXValues);
+      const maxX = Math.max(...allXValues);
+
+      chartDatasets.push({
+        label: `Baseline (${baselineInfo.baseline})`,
+        data: [{ x: minX, y: baselineInfo.baseline }, { x: maxX, y: baselineInfo.baseline }],
+        borderColor: '#10b981',
+        borderWidth: 2,
+        borderDash: [6, 4],
+        pointRadius: 0,
+        pointHoverRadius: 0,
+        showLine: true,
+        fill: false
+      });
+
+      if (baselineInfo.upperLimit !== null) {
+        chartDatasets.push({
+          label: `+Tol (${baselineInfo.upperLimit})`,
+          data: [{ x: minX, y: baselineInfo.upperLimit }, { x: maxX, y: baselineInfo.upperLimit }],
+          borderColor: '#f59e0b',
+          borderWidth: 1.5,
+          borderDash: [4, 4],
+          pointRadius: 0,
+          pointHoverRadius: 0,
+          showLine: true,
+          fill: false
+        });
+      }
+
+      if (baselineInfo.lowerLimit !== null) {
+        chartDatasets.push({
+          label: `-Tol (${baselineInfo.lowerLimit})`,
+          data: [{ x: minX, y: baselineInfo.lowerLimit }, { x: maxX, y: baselineInfo.lowerLimit }],
+          borderColor: '#f59e0b',
+          borderWidth: 1.5,
+          borderDash: [4, 4],
+          pointRadius: 0,
+          pointHoverRadius: 0,
+          showLine: true,
+          fill: false
+        });
+      }
+    }
 
     const options = {
       responsive: true,
@@ -336,7 +655,14 @@ export default function ChartCanvas({
       }
     };
 
-    chartComponent = <Line ref={chartRef} data={{ datasets: chartDatasets }} options={options} />;
+    chartComponent = (
+      <Line
+        ref={chartRef}
+        data={{ datasets: chartDatasets }}
+        options={options}
+        plugins={horizontalToleranceBandPlugin ? [horizontalToleranceBandPlugin] : []}
+      />
+    );
   }
 
   const ignoredCount = ignoredSessionIds.length;
@@ -383,6 +709,19 @@ export default function ChartCanvas({
         >
           <RefreshCw size={16} /> Retrieve & Load Data
         </button>
+      </div>
+    );
+  }
+
+  if (visibleDatasets.length === 0 || totalActivePoints === 0) {
+    return (
+      <div className="card" style={{ padding: '3rem', textAlign: 'center', color: '#64748b' }}>
+        <div style={{ fontSize: '1.1rem', fontWeight: '600', color: '#1e293b', marginBottom: '0.5rem' }}>
+          No Matching Patient QA Data Points in Selected Datasets
+        </div>
+        <p style={{ fontSize: '0.85rem' }}>
+          Check your active dataset scopes, units, time windows, or conditional filters.
+        </p>
       </div>
     );
   }
@@ -468,6 +807,266 @@ export default function ChartCanvas({
         >
           {chartComponent}
         </div>
+      </div>
+
+      {/* Baseline & Tolerance Reference Limits Card */}
+      <div className="card" style={{ padding: '1rem 1.25rem', background: '#ffffff', borderRadius: '8px', border: '1px solid #e2e8f0' }}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '0.75rem', marginBottom: baselineConfig?.enabled ? '0.85rem' : 0 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '0.65rem' }}>
+            <div style={{
+              width: '28px',
+              height: '28px',
+              borderRadius: '6px',
+              background: baselineConfig?.enabled ? '#ecfdf5' : '#f1f5f9',
+              color: baselineConfig?.enabled ? '#059669' : '#64748b',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center'
+            }}>
+              <Target size={16} />
+            </div>
+            <div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <span style={{ fontSize: '0.88rem', fontWeight: '700', color: '#0f172a' }}>
+                  Baseline & Tolerance Reference Limits
+                </span>
+                {baselineInfo && (
+                  <span style={{
+                    fontSize: '0.74rem',
+                    fontWeight: '600',
+                    padding: '2px 8px',
+                    borderRadius: '12px',
+                    background: '#ecfdf5',
+                    color: '#047857',
+                    border: '1px solid #a7f3d0'
+                  }}>
+                    Acceptable Zone: {baselineInfo.lowerLimit !== null ? baselineInfo.lowerLimit : '—'} to {baselineInfo.upperLimit !== null ? baselineInfo.upperLimit : '—'} (shaded green)
+                  </span>
+                )}
+              </div>
+              <p style={{ fontSize: '0.75rem', color: '#64748b', margin: 0 }}>
+                Set nominal target baseline and acceptable tolerance limits for {yVariable || 'measurement'}. Visible across time-series, normal curves, and box plots.
+              </p>
+            </div>
+          </div>
+
+          <label style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: '6px',
+            fontSize: '0.82rem',
+            fontWeight: '700',
+            color: baselineConfig?.enabled ? '#059669' : '#475569',
+            cursor: 'pointer',
+            padding: '0.35rem 0.65rem',
+            background: baselineConfig?.enabled ? '#ecfdf5' : '#f8fafc',
+            borderRadius: '6px',
+            border: baselineConfig?.enabled ? '1px solid #a7f3d0' : '1px solid #cbd5e1'
+          }}>
+            <input
+              type="checkbox"
+              checked={Boolean(baselineConfig?.enabled)}
+              onChange={(e) => {
+                if (onChangeBaselineConfig) {
+                  onChangeBaselineConfig({
+                    ...baselineConfig,
+                    enabled: e.target.checked
+                  });
+                }
+              }}
+            />
+            Enable Limits
+          </label>
+        </div>
+
+        {baselineConfig?.enabled && (
+          <div style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: '1rem',
+            flexWrap: 'wrap',
+            paddingTop: '0.75rem',
+            borderTop: '1px solid #f1f5f9'
+          }}>
+            {/* Baseline Value */}
+            <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+              <label style={{ fontSize: '0.78rem', fontWeight: '600', color: '#334155', whiteSpace: 'nowrap' }}>
+                Baseline Value:
+              </label>
+              <input
+                type="number"
+                step="any"
+                placeholder="e.g. 0.0"
+                value={baselineConfig.baseline ?? ''}
+                onChange={(e) => {
+                  if (onChangeBaselineConfig) {
+                    onChangeBaselineConfig({
+                      ...baselineConfig,
+                      baseline: e.target.value
+                    });
+                  }
+                }}
+                style={{
+                  width: '90px',
+                  padding: '0.35rem 0.5rem',
+                  borderRadius: '6px',
+                  border: '1px solid #cbd5e1',
+                  fontSize: '0.8rem',
+                  fontWeight: '600',
+                  background: '#ffffff'
+                }}
+              />
+            </div>
+
+            {/* Symmetric checkbox */}
+            <label style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: '5px',
+              fontSize: '0.78rem',
+              fontWeight: '600',
+              color: '#475569',
+              cursor: 'pointer',
+              whiteSpace: 'nowrap'
+            }}>
+              <input
+                type="checkbox"
+                checked={baselineConfig.symmetric !== false}
+                onChange={(e) => {
+                  if (onChangeBaselineConfig) {
+                    onChangeBaselineConfig({
+                      ...baselineConfig,
+                      symmetric: e.target.checked,
+                      lowerTol: e.target.checked ? baselineConfig.upperTol : baselineConfig.lowerTol
+                    });
+                  }
+                }}
+              />
+              Symmetric (±)
+            </label>
+
+            {/* Tolerances */}
+            {baselineConfig.symmetric !== false ? (
+              <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                <label style={{ fontSize: '0.78rem', fontWeight: '600', color: '#334155', whiteSpace: 'nowrap' }}>
+                  ± Tolerance:
+                </label>
+                <input
+                  type="number"
+                  step="any"
+                  placeholder="e.g. 2.0"
+                  value={baselineConfig.upperTol ?? ''}
+                  onChange={(e) => {
+                    if (onChangeBaselineConfig) {
+                      onChangeBaselineConfig({
+                        ...baselineConfig,
+                        upperTol: e.target.value,
+                        lowerTol: e.target.value
+                      });
+                    }
+                  }}
+                  style={{
+                    width: '80px',
+                    padding: '0.35rem 0.5rem',
+                    borderRadius: '6px',
+                    border: '1px solid #cbd5e1',
+                    fontSize: '0.8rem',
+                    fontWeight: '600',
+                    background: '#ffffff'
+                  }}
+                />
+              </div>
+            ) : (
+              <>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                  <label style={{ fontSize: '0.78rem', fontWeight: '600', color: '#334155', whiteSpace: 'nowrap' }}>
+                    + Upper Tol:
+                  </label>
+                  <input
+                    type="number"
+                    step="any"
+                    placeholder="e.g. 2.0"
+                    value={baselineConfig.upperTol ?? ''}
+                    onChange={(e) => {
+                      if (onChangeBaselineConfig) {
+                        onChangeBaselineConfig({
+                          ...baselineConfig,
+                          upperTol: e.target.value
+                        });
+                      }
+                    }}
+                    style={{
+                      width: '80px',
+                      padding: '0.35rem 0.5rem',
+                      borderRadius: '6px',
+                      border: '1px solid #cbd5e1',
+                      fontSize: '0.8rem',
+                      fontWeight: '600',
+                      background: '#ffffff'
+                    }}
+                  />
+                </div>
+
+                <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                  <label style={{ fontSize: '0.78rem', fontWeight: '600', color: '#334155', whiteSpace: 'nowrap' }}>
+                    - Lower Tol:
+                  </label>
+                  <input
+                    type="number"
+                    step="any"
+                    placeholder="e.g. 2.0"
+                    value={baselineConfig.lowerTol ?? ''}
+                    onChange={(e) => {
+                      if (onChangeBaselineConfig) {
+                        onChangeBaselineConfig({
+                          ...baselineConfig,
+                          lowerTol: e.target.value
+                        });
+                      }
+                    }}
+                    style={{
+                      width: '80px',
+                      padding: '0.35rem 0.5rem',
+                      borderRadius: '6px',
+                      border: '1px solid #cbd5e1',
+                      fontSize: '0.8rem',
+                      fontWeight: '600',
+                      background: '#ffffff'
+                    }}
+                  />
+                </div>
+              </>
+            )}
+
+            {/* Clear / Reset button */}
+            <button
+              type="button"
+              onClick={() => {
+                if (onChangeBaselineConfig) {
+                  onChangeBaselineConfig({
+                    enabled: false,
+                    baseline: '',
+                    upperTol: '',
+                    lowerTol: '',
+                    symmetric: true
+                  });
+                }
+              }}
+              style={{
+                marginLeft: 'auto',
+                padding: '0.3rem 0.65rem',
+                borderRadius: '6px',
+                background: 'transparent',
+                border: '1px solid #cbd5e1',
+                fontSize: '0.74rem',
+                color: '#64748b',
+                cursor: 'pointer'
+              }}
+            >
+              Clear Limits
+            </button>
+          </div>
+        )}
       </div>
 
       {/* Right-Click Context Menu Popup */}
