@@ -217,11 +217,45 @@ if exist "%~dp0python\\python.exe" (
   set "PYTHON_PATH=%~dp0python\\python.exe"
 )
 
+:: Locate portable Node.js runtime (bundled node.exe or system fallback)
+set "NODE_CMD="
+if exist "%~dp0node.exe" (
+  set "NODE_CMD=%~dp0node.exe"
+) else (
+  where node >nul 2>nul
+  if not errorlevel 1 (
+    set "NODE_CMD=node"
+  )
+)
+
+if "%NODE_CMD%"=="" (
+  echo.
+  echo ======================================================================
+  echo   ERROR: Node.js runtime (node.exe) was not found!
+  echo ======================================================================
+  echo.
+  echo   This usually happens for one of two reasons:
+  echo.
+  echo   1. The ZIP archive was not extracted before running:
+  echo      - Please close this window.
+  echo      - Right-click "standalone.zip" and choose "Extract All...".
+  echo      - Open the newly extracted folder and run START_QADENCE.bat from there.
+  echo.
+  echo   2. Hospital Antivirus / Endpoint Security quarantined "node.exe":
+  echo      - Check if your antivirus or Windows Defender blocked "node.exe".
+  echo      - Restore "node.exe" or add an exclusion for the QAdence folder.
+  echo.
+  echo ======================================================================
+  echo.
+  pause
+  exit /b 1
+)
+
 :: Automatically open default browser to the local app after 2 seconds
 start "" cmd /c "timeout /t 2 /nobreak >nul & start http://127.0.0.1:5000"
 
-:: Launch local Node server using the bundled portable runtime
-".\\node.exe" "server\\index.js"
+:: Launch local Node server using the located runtime
+"%NODE_CMD%" "%~dp0server\\index.js"
 
 if errorlevel 1 (
   echo.
