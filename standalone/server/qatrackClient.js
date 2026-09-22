@@ -1759,30 +1759,43 @@ class QATrackClient {
       }
 
 
-      // 2. Direct unit filtering via QATrack's DRF native parameters `unit_test_collection__unit` and `unit_test_collection__unit__name`.
-      // NOTE: QATrack+ DRF does NOT filter by ?unit=ID, but natively supports unit_test_collection__unit and unit_test_collection__unit__name.
-      if (targetUnitIds.length > 0) {
-        for (const uId of targetUnitIds) {
-          queryTargets.push({
-            params: { unit_test_collection__unit: uId },
-            label: `${unitIdToName.get(uId) || 'Unit #' + uId} (All QA Sessions via unit ID)`
-          });
-        }
-      }
-      for (const uName of targetUnits) {
-        queryTargets.push({
-          params: { unit_test_collection__unit__name: uName },
-          label: `${uName} (All QA Sessions via unit name)`
-        });
-      }
-
-      // 3. Query by test_list ID to capture any ad-hoc QA sessions or instances across all frequencies.
-      if (targetTestListIds.length > 0) {
-        for (const tlId of targetTestListIds) {
-          queryTargets.push({
-            params: { test_list: tlId },
-            label: `${testListIdToName.get(tlId) || 'List #' + tlId} (All instances)`
-          });
+      // 2. Targeted Fallback: Only if NO specific unit_test_collections matched above
+      // (e.g. ad-hoc QA, unassigned test list, or newly created machine/test list not yet in utcMap)
+      if (queryTargets.length === 0) {
+        if (targetUnitIds.length > 0 && targetTestListIds.length > 0) {
+          // Precise combined filter: filter by unit AND test list simultaneously in DRF
+          for (const uId of targetUnitIds) {
+            for (const tlId of targetTestListIds) {
+              queryTargets.push({
+                params: { unit_test_collection__unit: uId, test_list: tlId },
+                label: `${testListIdToName.get(tlId) || 'List #' + tlId} on ${unitIdToName.get(uId) || 'Unit #' + uId}`
+              });
+            }
+          }
+        } else if (targetUnitIds.length > 0) {
+          // Fallback to unit ID
+          for (const uId of targetUnitIds) {
+            queryTargets.push({
+              params: { unit_test_collection__unit: uId },
+              label: `${unitIdToName.get(uId) || 'Unit #' + uId}`
+            });
+          }
+        } else if (targetUnits.length > 0) {
+          // Fallback to unit name
+          for (const uName of targetUnits) {
+            queryTargets.push({
+              params: { unit_test_collection__unit__name: uName },
+              label: `${uName}`
+            });
+          }
+        } else if (targetTestListIds.length > 0) {
+          // Fallback to test list ID
+          for (const tlId of targetTestListIds) {
+            queryTargets.push({
+              params: { test_list: tlId },
+              label: `${testListIdToName.get(tlId) || 'List #' + tlId}`
+            });
+          }
         }
       }
 
