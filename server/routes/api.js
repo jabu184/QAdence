@@ -159,7 +159,7 @@ router.get('/schema/units', (req, res) => {
         COALESCE(u.unit_type, '') as unitType,
         u.active as active
       FROM units u
-      WHERE u.active = 1
+      WHERE u.active = 1 OR u.name IN (SELECT DISTINCT unit_name FROM sessions)
       UNION
       SELECT 
         s.unit_name as name,
@@ -167,7 +167,7 @@ router.get('/schema/units', (req, res) => {
         '' as unitType,
         1 as active
       FROM sessions s
-      WHERE s.unit_name NOT IN (SELECT name FROM units)
+      WHERE s.unit_name IS NOT NULL AND s.unit_name != '' AND LOWER(TRIM(s.unit_name)) NOT IN (SELECT LOWER(TRIM(name)) FROM units)
       ORDER BY unitClass ASC, name ASC
     `).all();
 
@@ -236,7 +236,7 @@ router.get('/schema/test-lists', (req, res) => {
       rows = db.prepare(`
         SELECT DISTINCT test_list_name as name
         FROM unit_test_collections
-        WHERE active = 1 AND unit_name IN (SELECT name FROM units WHERE active = 1)
+        WHERE (active = 1 OR unit_name IN (SELECT DISTINCT unit_name FROM sessions)) AND unit_name IS NOT NULL AND unit_name != ''
         ORDER BY name COLLATE NOCASE ASC
       `).all();
     }
@@ -270,7 +270,7 @@ router.get('/schema/tests', (req, res) => {
         WHERE test_list_name IN (
           SELECT DISTINCT test_list_name FROM sessions WHERE test_list_name IS NOT NULL AND test_list_name != ''
           UNION
-          SELECT DISTINCT test_list_name FROM unit_test_collections WHERE active = 1 AND unit_name IN (SELECT name FROM units WHERE active = 1)
+          SELECT DISTINCT test_list_name FROM unit_test_collections WHERE (active = 1 OR unit_name IN (SELECT DISTINCT unit_name FROM sessions)) AND unit_name IS NOT NULL AND unit_name != ''
         )
       `).all();
     } catch (_) {}
@@ -446,9 +446,15 @@ router.post('/query', async (req, res) => {
     }
 
     if (units && units.length > 0) {
-      const placeholders = units.map(() => '?').join(',');
-      sessionWhereClauses.push(`s.unit_name IN (${placeholders})`);
-      sessionParams.push(...units);
+      const exactUnits = units.map(u => String(u).trim()).filter(Boolean);
+      const strippedUnits = exactUnits.map(u => u.toLowerCase().replace(/[\s-_]/g, ''));
+      const p1 = exactUnits.map(() => '?').join(',');
+      const p2 = strippedUnits.map(() => '?').join(',');
+      sessionWhereClauses.push(`(
+        s.unit_name COLLATE NOCASE IN (${p1})
+        OR REPLACE(REPLACE(REPLACE(LOWER(TRIM(s.unit_name)), ' ', ''), '-', ''), '_', '') IN (${p2})
+      )`);
+      sessionParams.push(...exactUnits, ...strippedUnits);
     }
 
     // Test List filtering (if not including all instances)

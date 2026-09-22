@@ -261,14 +261,23 @@ export default function FilterControls({
               </button>
               {displayedUnits.map(unit => {
                 const uName = unit.name;
-                const active = selectedUnits.includes(uName);
+                const active = selectedUnits.some(s => {
+                  if (s === uName) return true;
+                  const a = String(s).toLowerCase().trim();
+                  const b = String(uName).toLowerCase().trim();
+                  return a === b || a.replace(/[\s-_]/g, '') === b.replace(/[\s-_]/g, '');
+                });
                 return (
                   <button
                     key={uName}
                     type="button"
                     onClick={() => {
                       if (active) {
-                        onChangeUnits(selectedUnits.filter(x => x !== uName));
+                        onChangeUnits(selectedUnits.filter(x => {
+                          const a = String(x).toLowerCase().trim();
+                          const b = String(uName).toLowerCase().trim();
+                          return a !== b && a.replace(/[\s-_]/g, '') !== b.replace(/[\s-_]/g, '');
+                        }));
                       } else {
                         onChangeUnits([...selectedUnits, uName]);
                       }

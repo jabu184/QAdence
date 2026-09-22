@@ -502,19 +502,29 @@ class QATrackClient {
         isActive
       );
 
-      // Only track ACTIVE units in memory maps for active session querying
+      // Always track ALL units in unitMap so machine resolution never fails
+      if (id) {
+        unitMap.set(id, name);
+        unitMap.set(String(id), name);
+      }
+      if (u.url) {
+        unitMap.set(u.url, name);
+        unitMap.set(u.url.replace(/\/$/, ''), name);
+      }
+      unitMap.set(name.toLowerCase().trim(), name);
+      unitMap.set(name.toLowerCase().replace(/[\s-_]/g, ''), name);
+
       if (isActive) {
         if (id) {
           activeUnitIds.add(id);
           activeUnitIds.add(String(id));
-          unitMap.set(id, name);
-          unitMap.set(String(id), name);
         }
         if (u.url) {
           activeUnitIds.add(u.url);
-          unitMap.set(u.url, name);
+          activeUnitIds.add(u.url.replace(/\/$/, ''));
         }
         activeUnitNames.add(name.toLowerCase().trim());
+        activeUnitNames.add(name.toLowerCase().replace(/[\s-_]/g, ''));
       }
     }
 
@@ -751,20 +761,17 @@ class QATrackClient {
         } catch (_) {}
       }
 
-      // If assignment is non-active, strictly do NOT retrieve it into memory active map
-      if (!isAssignmentActive) {
-        continue;
+      if (isAssignmentActive) {
+        if (tlId) activeAssignedTestListIds.add(tlId);
+        if (testListName) activeAssignedTestListNames.add(testListName.toLowerCase().trim());
       }
-
-      if (tlId) activeAssignedTestListIds.add(tlId);
-      if (testListName) activeAssignedTestListNames.add(testListName.toLowerCase().trim());
 
       const colInfo = {
         unitName,
         testListName,
         unitId: uId,
         testListId: tlId,
-        active: true,
+        active: Boolean(isAssignmentActive),
         frequency: typeof c.frequency === 'number' ? c.frequency : (this.extractIdFromUrl(c.frequency) || null),
         assignedTo: typeof c.assigned_to === 'number' ? c.assigned_to : (this.extractIdFromUrl(c.assigned_to) || null)
       };
@@ -1317,20 +1324,21 @@ class QATrackClient {
         utcMap = this.cachedMetadata.utcMap;
         testDefMap = this.cachedMetadata.testDefMap;
       } else {
-        const dbUnits = db.prepare('SELECT id, name FROM units WHERE active = 1').all();
+        const dbUnits = db.prepare('SELECT id, name FROM units').all();
         const dbLists = db.prepare('SELECT id, name FROM test_lists').all();
         let dbUtcs = [];
         try {
           dbUtcs = db.prepare(`
-            SELECT id, unit_name, test_list_name, unit_id, test_list_id
+            SELECT id, unit_name, test_list_name, unit_id, test_list_id, active
             FROM unit_test_collections
-            WHERE active = 1 AND unit_name IN (SELECT name FROM units WHERE active = 1)
           `).all();
         } catch (_) {}
 
         for (const u of dbUnits) {
           unitMap.set(u.id, u.name);
           unitMap.set(String(u.id), u.name);
+          unitMap.set(u.name.toLowerCase().trim(), u.name);
+          unitMap.set(u.name.toLowerCase().replace(/[\s-_]/g, ''), u.name);
         }
         for (const l of dbLists) {
           testListMap.set(l.id, l.name);
@@ -1491,6 +1499,41 @@ class QATrackClient {
               }
             }
 
+            // Fallback: If uName still unassigned (e.g. ad-hoc session or non-scheduled test list), resolve from test instances' UTIs
+            if (!uName && rawTestInstances.length > 0) {
+              for (const ti of rawTestInstances) {
+                const utiKey = ti.unit_test_info ? (typeof ti.unit_test_info === 'number' ? ti.unit_test_info : this.extractIdFromUrl(ti.unit_test_info)) : null;
+                const uti = utiKey ? (utiMap.get(utiKey) || utiMap.get(String(utiKey)) || utiMap.get(ti.unit_test_info)) : null;
+                if (uti) {
+                  if (uti.unitId && (unitMap.has(uti.unitId) || unitMap.has(String(uti.unitId)))) {
+                    uName = unitMap.get(uti.unitId) || unitMap.get(String(uti.unitId));
+                    break;
+                  }
+                  if (uti.unitUrl && unitMap.has(uti.unitUrl)) {
+                    uName = unitMap.get(uti.unitUrl);
+                    break;
+                  }
+                }
+              }
+            }
+            if (!uName && rawTestInstances.length > 0) {
+              try {
+                for (const ti of rawTestInstances) {
+                  const utiKey = ti.unit_test_info ? (typeof ti.unit_test_info === 'number' ? ti.unit_test_info : this.extractIdFromUrl(ti.unit_test_info)) : null;
+                  if (utiKey) {
+                    const dbUti = db.prepare('SELECT unit_id FROM unit_test_infos WHERE id = ?').get(utiKey);
+                    if (dbUti && dbUti.unit_id) {
+                      const dbU = db.prepare('SELECT name FROM units WHERE id = ?').get(dbUti.unit_id);
+                      if (dbU && dbU.name) {
+                        uName = dbU.name;
+                        break;
+                      }
+                    }
+                  }
+                }
+              } catch (_) {}
+            }
+
             if (!tListName) {
               if (colInfo?.testListName) {
                 tListName = colInfo.testListName;
@@ -1515,14 +1558,24 @@ class QATrackClient {
             if (!matches) continue;
           }
 
-          // Filter by unitNames if specified
+          // Filter by unitNames if specified (fuzzy match: lowercase and stripped spaces/hyphens)
           if (targetUnits.length > 0) {
-            const uMatch = targetUnits.some(un => un.toLowerCase().trim() === uName.toLowerCase().trim());
+            const uMatch = targetUnits.some(un => {
+              const a = un.toLowerCase().trim();
+              const b = uName.toLowerCase().trim();
+              return a === b || a.replace(/[\s-_]/g, '') === b.replace(/[\s-_]/g, '');
+            });
             if (!uMatch) continue;
           }
 
-          // Do NOT retrieve or ingest sessions for non-active units!
-          if (!activeUnitNames.has(uName.toLowerCase().trim())) {
+          // Ingest sessions for active units, OR any unit specifically requested by the user
+          const isExplicitlyRequested = targetUnits.length > 0 && targetUnits.some(un => {
+            const a = un.toLowerCase().trim();
+            const b = uName.toLowerCase().trim();
+            return a === b || a.replace(/[\s-_]/g, '') === b.replace(/[\s-_]/g, '');
+          });
+          const uClean = uName.toLowerCase().replace(/[\s-_]/g, '');
+          if (!isExplicitlyRequested && activeUnitNames.size > 0 && !activeUnitNames.has(uName.toLowerCase().trim()) && !activeUnitNames.has(uClean)) {
             continue;
           }
 
@@ -1613,12 +1666,13 @@ class QATrackClient {
         } catch (_) {}
       }
 
-      // Filter targetUnits so it strictly targets active machines (never inactive units!)
-      let effectiveTargetUnits = targetUnits.filter(u => activeUnitNames.has(u.toLowerCase().trim()));
-      if (effectiveTargetUnits.length === 0 && targetUnits.length === 0) {
+      // Target units: if specific units were requested, preserve them; otherwise default to active units
+      let effectiveTargetUnits = [...targetUnits];
+      if (effectiveTargetUnits.length === 0) {
         effectiveTargetUnits = activeUnitRows.map(u => u.name);
       }
       const targetUnitsLower = effectiveTargetUnits.map(u => u.toLowerCase().trim());
+      const targetUnitsClean = effectiveTargetUnits.map(u => u.toLowerCase().replace(/[\s-_]/g, ''));
 
       // Target test lists: include all specified targetLists (do not filter against local sessions table)
       const effectiveTargetLists = [...targetLists];
@@ -1656,7 +1710,9 @@ class QATrackClient {
       if (targetUnitsLower.length > 0) {
         for (const [uId, uName] of unitMap.entries()) {
           const numUId = typeof uId === 'number' ? uId : (typeof uId === 'string' && /^\d+$/.test(uId) ? parseInt(uId, 10) : null);
-          if (numUId !== null && targetUnitsLower.includes((uName || '').toLowerCase().trim())) {
+          const uLower = (uName || '').toLowerCase().trim();
+          const uClean = uLower.replace(/[\s-_]/g, '');
+          if (numUId !== null && (targetUnitsLower.includes(uLower) || targetUnitsClean.includes(uClean))) {
             if (!targetUnitIds.includes(numUId)) {
               targetUnitIds.push(numUId);
               unitIdToName.set(numUId, uName);
@@ -1664,9 +1720,11 @@ class QATrackClient {
           }
         }
         try {
-          const dbUnits = db.prepare('SELECT id, name FROM units WHERE active = 1').all();
+          const dbUnits = db.prepare('SELECT id, name FROM units').all();
           for (const u of dbUnits) {
-            if (u.id && targetUnitsLower.includes((u.name || '').toLowerCase().trim())) {
+            const uLower = (u.name || '').toLowerCase().trim();
+            const uClean = uLower.replace(/[\s-_]/g, '');
+            if (u.id && (targetUnitsLower.includes(uLower) || targetUnitsClean.includes(uClean))) {
               if (!targetUnitIds.includes(u.id)) {
                 targetUnitIds.push(u.id);
                 unitIdToName.set(u.id, u.name);
@@ -1687,10 +1745,13 @@ class QATrackClient {
       for (const [colKey, colInfo] of utcMap.entries()) {
         const numColId = typeof colKey === 'number' ? colKey : (typeof colKey === 'string' && /^\d+$/.test(colKey) ? parseInt(colKey, 10) : null);
         if (!numColId || matchedUtcIds.has(numColId)) continue;
-        if (colInfo.active === false) continue;
+
+        const colUnitLower = (colInfo.unitName || '').toLowerCase().trim();
+        const colUnitClean = colUnitLower.replace(/[\s-_]/g, '');
 
         const uMatch = targetUnitsLower.length === 0 ||
-          (colInfo.unitName && targetUnitsLower.includes(colInfo.unitName.toLowerCase().trim())) ||
+          targetUnitsLower.includes(colUnitLower) ||
+          targetUnitsClean.includes(colUnitClean) ||
           (colInfo.unitId && targetUnitIds.includes(colInfo.unitId));
 
         const tlMatch = targetListsLower.length === 0 ||
@@ -1698,6 +1759,9 @@ class QATrackClient {
           (colInfo.testListId && targetTestListIds.includes(colInfo.testListId));
 
         if (uMatch && tlMatch) {
+          const isExplicitUnit = targetUnitsLower.length > 0 && (targetUnitsLower.includes(colUnitLower) || targetUnitsClean.includes(colUnitClean) || (colInfo.unitId && targetUnitIds.includes(colInfo.unitId)));
+          if (colInfo.active === false && !isExplicitUnit) continue;
+
           matchedUtcIds.add(numColId);
           queryTargets.push({
             params: { unit_test_collection: numColId },
@@ -1706,6 +1770,7 @@ class QATrackClient {
           });
         }
       }
+
 
       // 2. Also query by test_list ID (without the unsupported unit parameter) to capture
       // any ad-hoc QA sessions or instances across all frequencies.
@@ -2016,8 +2081,28 @@ class QATrackClient {
             }
           }
 
-          // Do NOT retrieve or ingest non-active units!
-          if (!activeUnitNames.has(unitName.toLowerCase().trim())) {
+          // Fallback: If unitName still unassigned (e.g. ad-hoc sessions), resolve from test instances' UTIs
+          if ((unitName === 'Unknown Machine' || !unitName) && rawTestInstances.length > 0) {
+            for (const ti of rawTestInstances) {
+              const utiKey = ti.unit_test_info ? (typeof ti.unit_test_info === 'number' ? ti.unit_test_info : this.extractIdFromUrl(ti.unit_test_info)) : null;
+              const uti = utiKey ? (utiMap.get(utiKey) || utiMap.get(String(utiKey)) || utiMap.get(ti.unit_test_info)) : null;
+              if (uti) {
+                if (uti.unitId && (unitMap.has(uti.unitId) || unitMap.has(String(uti.unitId)))) {
+                  unitName = unitMap.get(uti.unitId) || unitMap.get(String(uti.unitId));
+                  break;
+                }
+                if (uti.unitUrl && unitMap.has(uti.unitUrl)) {
+                  unitName = unitMap.get(uti.unitUrl);
+                  break;
+                }
+              }
+            }
+          }
+
+          // Do NOT retrieve or ingest non-active units UNLESS unit exists in units database
+          const uLower = unitName.toLowerCase().trim();
+          const uClean = uLower.replace(/[\s-_]/g, '');
+          if (activeUnitNames.size > 0 && !activeUnitNames.has(uLower) && !activeUnitNames.has(uClean)) {
             continue;
           }
 
