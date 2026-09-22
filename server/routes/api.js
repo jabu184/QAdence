@@ -413,7 +413,7 @@ router.post('/query', async (req, res) => {
         WHERE tv.test_name = ?
       `;
       const countParams = [yVariable];
-      if (targetLists.length > 0) {
+      if (!includeAllInstances && targetLists.length > 0) {
         const placeholders = targetLists.map(() => '?').join(',');
         countQuery += ` AND s.test_list_name IN (${placeholders})`;
         countParams.push(...targetLists);

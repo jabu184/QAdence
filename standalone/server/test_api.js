@@ -519,6 +519,78 @@ const server = app.listen(5099, async () => {
     db.prepare('DELETE FROM unit_test_infos WHERE id = 555').run();
     console.log('Verified: Composite calculations and UTI fallbacks handled correctly!');
 
+    // 4. Test Multi-Frequency & Ad-Hoc Test Resolution & Querying
+    console.log('Testing Multi-Frequency & Ad-Hoc Test Capture...');
+
+    // Test resolveUnitName and resolveTestListName
+    const testUnitMap = new Map([[1, 'TrueBeam 1'], ['2', 'LA10']]);
+    if (qatrackClient.resolveUnitName(1, testUnitMap) !== 'TrueBeam 1' ||
+        qatrackClient.resolveUnitName('2', testUnitMap) !== 'LA10' ||
+        qatrackClient.resolveUnitName('http://localhost/api/units/1/', testUnitMap) !== 'TrueBeam 1') {
+      throw new Error('resolveUnitName failed to resolve unit across ID/URL formats');
+    }
+
+    const testTlMap = new Map([[10, 'Monthly Linac QA'], ['20', 'Weekly Linac QA']]);
+    if (qatrackClient.resolveTestListName(10, testTlMap) !== 'Monthly Linac QA' ||
+        qatrackClient.resolveTestListName('20', testTlMap) !== 'Weekly Linac QA' ||
+        qatrackClient.resolveTestListName('http://localhost/api/testlists/10/', testTlMap) !== 'Monthly Linac QA') {
+      throw new Error('resolveTestListName failed to resolve test list across ID/URL formats');
+    }
+
+    // Test resolveTestInstanceInfo with testDefMap (no UTI, direct test reference)
+    const testDefMapMock = new Map([
+      [888, { name: 'Dose Output 6MV', slug: 'dose_output_6mv', unit: 'cGy', type: 'simple' }]
+    ]);
+    const resolvedDirectTest = qatrackClient.resolveTestInstanceInfo({ test: 888 }, new Map(), testDefMapMock);
+    if (resolvedDirectTest.testName !== 'Dose Output 6MV' || resolvedDirectTest.unit !== 'cGy') {
+      throw new Error(`Expected Dose Output 6MV from testDefMap, got ${JSON.stringify(resolvedDirectTest)}`);
+    }
+
+    // Add multi-frequency test lists and sessions: Monthly, Weekly, and Ad-Hoc
+    db.prepare(`INSERT OR REPLACE INTO test_lists (id, name) VALUES (10, 'Monthly Linac QA'), (20, 'Weekly Linac QA'), (30, 'Ad-Hoc Linac QA')`).run();
+    db.prepare(`INSERT OR REPLACE INTO test_definitions (name, slug, test_list_name, unit, data_type, is_numeric) VALUES 
+      ('Output 6MV', 'output_6mv', 'Monthly Linac QA', '%', 'simple', 1),
+      ('Output 6MV', 'output_6mv', 'Weekly Linac QA', '%', 'simple', 1),
+      ('Output 6MV', 'output_6mv', 'Ad-Hoc Linac QA', '%', 'simple', 1)
+    `).run();
+
+    // Session 101: Monthly collection
+    const sMonthly = db.prepare(`INSERT INTO sessions (qatrack_instance_id, unit_id, unit_name, test_list_name, work_completed, created_by, status) VALUES (101, 1, 'TrueBeam 1', 'Monthly Linac QA', '2026-02-01 10:00:00', 'Physicist', 'Pass')`).run().lastInsertRowid;
+    db.prepare(`INSERT INTO test_values (session_id, test_name, test_slug, value_string, value_numeric, unit, status) VALUES (?, 'Output 6MV', 'output_6mv', '100.2', 100.2, '%', 'OK')`).run(sMonthly);
+
+    // Session 102: Weekly collection
+    const sWeekly = db.prepare(`INSERT INTO sessions (qatrack_instance_id, unit_id, unit_name, test_list_name, work_completed, created_by, status) VALUES (102, 1, 'TrueBeam 1', 'Weekly Linac QA', '2026-02-08 10:00:00', 'Physicist', 'Pass')`).run().lastInsertRowid;
+    db.prepare(`INSERT INTO test_values (session_id, test_name, test_slug, value_string, value_numeric, unit, status) VALUES (?, 'Output 6MV', 'output_6mv', '100.4', 100.4, '%', 'OK')`).run(sWeekly);
+
+    // Session 103: Ad-Hoc session (no scheduled collection)
+    const sAdHoc = db.prepare(`INSERT INTO sessions (qatrack_instance_id, unit_id, unit_name, test_list_name, work_completed, created_by, status) VALUES (103, 1, 'TrueBeam 1', 'Ad-Hoc Linac QA', '2026-02-15 10:00:00', 'Physicist', 'Pass')`).run().lastInsertRowid;
+    db.prepare(`INSERT INTO test_values (session_id, test_name, test_slug, value_string, value_numeric, unit, status) VALUES (?, 'Output 6MV', 'output_6mv', '100.1', 100.1, '%', 'OK')`).run(sAdHoc);
+
+    // Query with includeAllInstances = true
+    const multiFreqAllRes = await axios.post(`${base}/query`, {
+      yVariable: 'Output 6MV',
+      includeAllInstances: true
+    });
+    if (multiFreqAllRes.data.matchedPoints !== 3) {
+      throw new Error(`Expected 3 matched points across Monthly, Weekly, and Ad-Hoc sessions, got ${multiFreqAllRes.data.matchedPoints}`);
+    }
+    const retrievedLists = multiFreqAllRes.data.dataPoints.map(p => p.metadata?.testList);
+    if (!retrievedLists.includes('Monthly Linac QA') || !retrievedLists.includes('Weekly Linac QA') || !retrievedLists.includes('Ad-Hoc Linac QA')) {
+      throw new Error(`Expected points from Monthly, Weekly, and Ad-Hoc lists, got: ${JSON.stringify(retrievedLists)}`);
+    }
+
+    // Query scoped to Weekly only (includeAllInstances = false)
+    const weeklyScopedRes = await axios.post(`${base}/query`, {
+      yVariable: 'Output 6MV',
+      testLists: ['Weekly Linac QA'],
+      includeAllInstances: false
+    });
+    if (weeklyScopedRes.data.matchedPoints !== 1 || weeklyScopedRes.data.dataPoints[0].metadata?.testList !== 'Weekly Linac QA') {
+      throw new Error(`Expected 1 matched point for Weekly Linac QA, got ${weeklyScopedRes.data.matchedPoints}`);
+    }
+
+    console.log('Verified: Multi-frequency and ad-hoc test lists captured and queryable correctly!');
+
     console.log('ALL API TESTS PASSED SUCCESSFULLY!');
   } catch (err) {
     console.error('Test failed:', err.response?.data || err.message);

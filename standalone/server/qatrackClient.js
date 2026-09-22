@@ -258,6 +258,36 @@ class QATrackClient {
     return match ? parseInt(match[1], 10) : null;
   }
 
+  resolveUnitName(uRef, unitMap) {
+    if (!uRef || !unitMap) return null;
+    if (unitMap.has(uRef)) return unitMap.get(uRef);
+    if (typeof uRef === 'number' && unitMap.has(String(uRef))) return unitMap.get(String(uRef));
+    if (typeof uRef === 'string') {
+      if (/^\d+$/.test(uRef) && unitMap.has(parseInt(uRef, 10))) return unitMap.get(parseInt(uRef, 10));
+      const extractedId = this.extractIdFromUrl(uRef);
+      if (extractedId && unitMap.has(extractedId)) return unitMap.get(extractedId);
+      if (extractedId && unitMap.has(String(extractedId))) return unitMap.get(String(extractedId));
+      const trimmed = uRef.replace(/\/$/, '');
+      if (unitMap.has(trimmed)) return unitMap.get(trimmed);
+    }
+    return null;
+  }
+
+  resolveTestListName(tlRef, testListMap) {
+    if (!tlRef || !testListMap) return null;
+    if (testListMap.has(tlRef)) return testListMap.get(tlRef);
+    if (typeof tlRef === 'number' && testListMap.has(String(tlRef))) return testListMap.get(String(tlRef));
+    if (typeof tlRef === 'string') {
+      if (/^\d+$/.test(tlRef) && testListMap.has(parseInt(tlRef, 10))) return testListMap.get(parseInt(tlRef, 10));
+      const extractedId = this.extractIdFromUrl(tlRef);
+      if (extractedId && testListMap.has(extractedId)) return testListMap.get(extractedId);
+      if (extractedId && testListMap.has(String(extractedId))) return testListMap.get(String(extractedId));
+      const trimmed = tlRef.replace(/\/$/, '');
+      if (testListMap.has(trimmed)) return testListMap.get(trimmed);
+    }
+    return null;
+  }
+
   async discoverEndpoints() {
     let rootData = {};
     try {
@@ -511,8 +541,23 @@ class QATrackClient {
         calculation_procedure: t.calculation_procedure || '',
         formatting: t.formatting || ''
       };
-      if (id) testDefMap.set(id, testInfo);
-      if (t.url) testDefMap.set(t.url, testInfo);
+      if (id) {
+        testDefMap.set(id, testInfo);
+        testDefMap.set(String(id), testInfo);
+      }
+      if (t.url) {
+        testDefMap.set(t.url, testInfo);
+        testDefMap.set(t.url.replace(/\/$/, ''), testInfo);
+        const relUrl = t.url.replace(/^https?:\/\/[^\/]+/, '');
+        testDefMap.set(relUrl, testInfo);
+        testDefMap.set(relUrl.replace(/\/$/, ''), testInfo);
+      }
+      if (t.slug) {
+        testDefMap.set(t.slug, testInfo);
+      }
+      if (testName) {
+        testDefMap.set(testName, testInfo);
+      }
     }
 
     // 4. Unit Test Infos (filter out non-active units & non-active mappings)
@@ -664,21 +709,23 @@ class QATrackClient {
     for (const tl of testLists) {
       const id = tl.id || this.extractIdFromUrl(tl.url);
       const name = tl.name;
-      const nameLower = (name || '').toLowerCase().trim();
-      const hasActiveAssignment = (id && activeAssignedTestListIds.has(id)) || activeAssignedTestListNames.has(nameLower);
-      const hasDataInSessions = existingSessionLists.has(nameLower);
+      if (!name) continue;
 
-      // Do NOT retrieve test lists with no data / no active assignments!
-      if (!hasActiveAssignment && !hasDataInSessions) {
-        continue;
-      }
+      try {
+        insertTestList.run(id, name, tl.slug || '', tl.description || '');
+      } catch (_) {}
 
-      insertTestList.run(id, name, tl.slug || '', tl.description || '');
       if (id) {
         testListMap.set(id, name);
         testListMap.set(String(id), name);
       }
-      if (tl.url) testListMap.set(tl.url, name);
+      if (tl.url) {
+        testListMap.set(tl.url, name);
+        testListMap.set(tl.url.replace(/\/$/, ''), name);
+        const relUrl = tl.url.replace(/^https?:\/\/[^\/]+/, '');
+        testListMap.set(relUrl, name);
+        testListMap.set(relUrl.replace(/\/$/, ''), name);
+      }
     }
 
     // Update test_list_name in utcMap and insertUtc where resolved from testListMap
@@ -768,16 +815,18 @@ class QATrackClient {
       }
     }
 
-    // Also populate from test lists directly IF they have active assignments or data (including sublists!)
+    // Also populate from all test lists directly (including sublists!) across all frequencies and ad-hoc lists
     for (const tl of testLists) {
-      const id = tl.id || this.extractIdFromUrl(tl.url);
-      if (!testListMap.has(id)) continue; // Skip test lists with no data!
+      if (!tl || !tl.name) continue;
 
       const allTests = getAllTestsForTestList(tl);
       for (const tRef of allTests) {
-        const t = testDefMap.get(tRef) || (typeof tRef === 'string' && testDefMap.get(this.extractIdFromUrl(tRef)));
+        const t = testDefMap.get(tRef) ||
+          (typeof tRef === 'string' && (testDefMap.get(this.extractIdFromUrl(tRef)) || testDefMap.get(tRef.replace(/\/$/, ''))));
         if (t && t.name) {
-          insertTestDef.run(t.name, t.slug, tl.name, t.unit || '', t.type, this.isNumericType(t));
+          try {
+            insertTestDef.run(t.name, t.slug, tl.name, t.unit || '', t.type, this.isNumericType(t));
+          } catch (_) {}
         }
       }
     }
@@ -1007,7 +1056,7 @@ class QATrackClient {
     return utiMap;
   }
 
-  resolveTestInstanceInfo(ti, utiMap) {
+  resolveTestInstanceInfo(ti, utiMap, testDefMap = null) {
     if (!ti) return { testName: 'Test', testSlug: '', unit: '', isNumeric: false };
 
     let utiInfo = null;
@@ -1025,6 +1074,7 @@ class QATrackClient {
     let unit = utiInfo?.unit || ti.unit || '';
     let isNumeric = utiInfo?.isNumeric ?? false;
 
+    // 1. Try unit_test_infos table in SQLite if ti.unit_test_info exists
     if (!testName && ti.unit_test_info) {
       const utiId = typeof ti.unit_test_info === 'number' ? ti.unit_test_info : this.extractIdFromUrl(ti.unit_test_info);
       if (utiId) {
@@ -1037,6 +1087,51 @@ class QATrackClient {
             isNumeric = dbUti.is_numeric === 1;
           }
         } catch (_) {}
+      }
+    }
+
+    // 2. Try testDefMap in memory if ti.test or ti.test_id exists
+    if ((!testName || testName === 'Test') && testDefMap) {
+      const tRef = ti.test || ti.test_id;
+      if (tRef) {
+        const tDef = testDefMap.get(tRef) ||
+          (typeof tRef === 'number' && testDefMap.get(String(tRef))) ||
+          (typeof tRef === 'string' && (testDefMap.get(this.extractIdFromUrl(tRef)) || testDefMap.get(tRef.replace(/\/$/, ''))));
+        if (tDef) {
+          testName = tDef.name || testName;
+          testSlug = tDef.slug || testSlug;
+          unit = tDef.unit || unit;
+          isNumeric = this.isNumericType(tDef);
+        }
+      }
+    }
+
+    // 3. Try test_definitions or unit_test_infos in SQLite
+    if (!testName || testName === 'Test') {
+      const tRef = ti.test || ti.test_id;
+      const tId = typeof tRef === 'number' ? tRef : (tRef ? this.extractIdFromUrl(tRef) : null);
+      if (tId) {
+        try {
+          const dbDef = db.prepare('SELECT name, slug, unit, is_numeric FROM test_definitions WHERE slug = ? OR name = ? OR id = ?').get(String(tId), String(tId), tId);
+          if (dbDef) {
+            testName = dbDef.name;
+            testSlug = dbDef.slug || testSlug;
+            unit = dbDef.unit || unit;
+            isNumeric = dbDef.is_numeric === 1;
+          }
+        } catch (_) {}
+
+        if (!testName || testName === 'Test') {
+          try {
+            const dbUtiTest = db.prepare('SELECT test_name, test_slug, unit, is_numeric FROM unit_test_infos WHERE test_id = ?').get(tId);
+            if (dbUtiTest) {
+              testName = dbUtiTest.test_name;
+              testSlug = dbUtiTest.test_slug || testSlug;
+              unit = dbUtiTest.unit || unit;
+              isNumeric = dbUtiTest.is_numeric === 1;
+            }
+          } catch (_) {}
+        }
       }
     }
 
@@ -1176,12 +1271,14 @@ class QATrackClient {
       let testListMap = new Map();
       let utiMap = new Map();
       let utcMap = new Map();
+      let testDefMap = this.cachedMetadata?.testDefMap || null;
 
       if (this.cachedMetadata) {
         unitMap = this.cachedMetadata.unitMap;
         testListMap = this.cachedMetadata.testListMap;
         utiMap = this.cachedMetadata.utiMap;
         utcMap = this.cachedMetadata.utcMap;
+        testDefMap = this.cachedMetadata.testDefMap;
       } else {
         const dbUnits = db.prepare('SELECT id, name FROM units WHERE active = 1').all();
         const dbLists = db.prepare('SELECT id, name FROM test_lists').all();
@@ -1219,8 +1316,22 @@ class QATrackClient {
           testListMap = meta.testListMap;
           utiMap = meta.utiMap;
           utcMap = meta.utcMap;
+          testDefMap = meta.testDefMap;
         } else {
-          this.cachedMetadata = { unitMap, testListMap, utiMap, utcMap };
+          testDefMap = new Map();
+          try {
+            const dbDefs = db.prepare('SELECT id, name, slug, unit, data_type, is_numeric FROM test_definitions').all();
+            for (const d of dbDefs) {
+              const info = { id: d.id, name: d.name, slug: d.slug, unit: d.unit, type: d.data_type, is_numeric: d.is_numeric === 1 };
+              if (d.id) {
+                testDefMap.set(d.id, info);
+                testDefMap.set(String(d.id), info);
+              }
+              if (d.slug) testDefMap.set(d.slug, info);
+              if (d.name) testDefMap.set(d.name, info);
+            }
+          } catch (_) {}
+          this.cachedMetadata = { unitMap, testListMap, utiMap, utcMap, testDefMap };
         }
       }
 
@@ -1316,40 +1427,55 @@ class QATrackClient {
           fetchedQATrackIds.add(qatrackId);
           fetchedQATrackIds.add(Number(qatrackId));
 
-          let uName = directColInfo?.unitName || 'Unknown Machine';
-          let tListName = directColInfo?.testListName || 'Patient Specific QA';
+          let uName = directColInfo?.unitName;
+          let tListName = directColInfo?.testListName;
 
-          if (!directColInfo) {
+          if (!uName || !tListName) {
             const utcId = inst.unit_test_collection !== undefined && inst.unit_test_collection !== null
               ? (typeof inst.unit_test_collection === 'number' ? inst.unit_test_collection : (this.extractIdFromUrl(inst.unit_test_collection) || inst.unit_test_collection))
               : null;
-            const colInfo = utcMap.get(utcId) || (typeof utcId === 'number' && utcMap.get(String(utcId)));
-            if (colInfo?.unitName) {
-              uName = colInfo.unitName;
-            } else if (unitMap.has(inst.unit)) {
-              uName = unitMap.get(inst.unit);
-            } else if (typeof inst.unit_name === 'string') {
-              uName = inst.unit_name;
+            const colInfo = utcId ? (utcMap.get(utcId) || (typeof utcId === 'number' && utcMap.get(String(utcId)))) : null;
+            if (!uName) {
+              if (colInfo?.unitName) {
+                uName = colInfo.unitName;
+              } else {
+                const resolvedUnit = this.resolveUnitName(inst.unit, unitMap);
+                if (resolvedUnit) {
+                  uName = resolvedUnit;
+                } else if (typeof inst.unit_name === 'string') {
+                  uName = inst.unit_name;
+                }
+              }
             }
 
-            if (colInfo?.testListName) {
-              tListName = colInfo.testListName;
-            } else if (testListMap.get(inst.test_list)) {
-              tListName = testListMap.get(inst.test_list);
+            if (!tListName) {
+              if (colInfo?.testListName) {
+                tListName = colInfo.testListName;
+              } else {
+                const resolvedList = this.resolveTestListName(inst.test_list, testListMap);
+                if (resolvedList) {
+                  tListName = resolvedList;
+                } else if (typeof inst.test_list_name === 'string' && inst.test_list_name) {
+                  tListName = inst.test_list_name;
+                }
+              }
             }
+          }
 
-            // Filter by testListNames if specified
-            if (targetLists.length > 0) {
-              const matches = targetLists.some(tl => tl.toLowerCase().trim() === tListName.toLowerCase().trim()) ||
-                (inst.test_list_name && targetLists.some(tl => tl.toLowerCase().trim() === inst.test_list_name.toLowerCase().trim()));
-              if (!matches) continue;
-            }
+          if (!uName) uName = 'Unknown Machine';
+          if (!tListName) tListName = 'Patient Specific QA';
 
-            // Filter by unitNames if specified
-            if (targetUnits.length > 0) {
-              const uMatch = targetUnits.some(un => un.toLowerCase().trim() === uName.toLowerCase().trim());
-              if (!uMatch) continue;
-            }
+          // Filter by testListNames if specified
+          if (targetLists.length > 0) {
+            const matches = targetLists.some(tl => tl.toLowerCase().trim() === tListName.toLowerCase().trim()) ||
+              (inst.test_list_name && targetLists.some(tl => tl.toLowerCase().trim() === inst.test_list_name.toLowerCase().trim()));
+            if (!matches) continue;
+          }
+
+          // Filter by unitNames if specified
+          if (targetUnits.length > 0) {
+            const uMatch = targetUnits.some(un => un.toLowerCase().trim() === uName.toLowerCase().trim());
+            if (!uMatch) continue;
           }
 
           // Do NOT retrieve or ingest sessions for non-active units!
@@ -1395,7 +1521,7 @@ class QATrackClient {
                 continue;
               }
 
-              const tiInfo = this.resolveTestInstanceInfo(ti, utiMap);
+              const tiInfo = this.resolveTestInstanceInfo(ti, utiMap, testDefMap);
               const { numVal, strVal } = this.extractTestInstanceValue(ti);
 
               insertTestVal.run(
@@ -1427,8 +1553,19 @@ class QATrackClient {
         try {
           const defRows = db.prepare('SELECT DISTINCT test_list_name FROM test_definitions WHERE name = ?').all(options.yVariable);
           const resolvedLists = defRows.map(r => r.test_list_name).filter(l => l && l !== 'General QA');
-          if (resolvedLists.length > 0) {
-            targetLists.push(...resolvedLists);
+          for (const l of resolvedLists) {
+            if (!targetLists.includes(l)) targetLists.push(l);
+          }
+          const sessRows = db.prepare(`
+            SELECT DISTINCT s.test_list_name 
+            FROM sessions s 
+            JOIN test_values tv ON s.id = tv.session_id 
+            WHERE tv.test_name = ?
+          `).all(options.yVariable);
+          for (const sr of sessRows) {
+            if (sr.test_list_name && sr.test_list_name !== 'General QA' && !targetLists.includes(sr.test_list_name)) {
+              targetLists.push(sr.test_list_name);
+            }
           }
         } catch (_) {}
       }
@@ -1440,168 +1577,137 @@ class QATrackClient {
       }
       const targetUnitsLower = effectiveTargetUnits.map(u => u.toLowerCase().trim());
 
-      // Filter targetLists: exclude test lists that have no data and no active assignments
-      const availableLists = db.prepare(`
-        SELECT DISTINCT test_list_name FROM unit_test_collections WHERE active = 1 AND unit_name IN (SELECT name FROM units WHERE active = 1)
-        UNION
-        SELECT DISTINCT test_list_name FROM sessions WHERE test_list_name IS NOT NULL
-      `).all().map(r => r.test_list_name.toLowerCase().trim());
-
-      const effectiveTargetLists = targetLists.filter(l => availableLists.includes(l.toLowerCase().trim()));
+      // Target test lists: include all specified targetLists (do not filter against local sessions table)
+      const effectiveTargetLists = [...targetLists];
       const targetListsLower = effectiveTargetLists.map(l => l.toLowerCase().trim());
 
-      // Find matching collection IDs from utcMap if targetLists or targetUnits specified
-      const matchingCollectionIds = [];
-      const seenColIds = new Set();
-      for (const [key, col] of utcMap.entries()) {
-        const numId = typeof key === 'number' ? key : (typeof key === 'string' && !key.startsWith('http') && /^\d+$/.test(key) ? parseInt(key, 10) : null);
-        if (numId !== null && !seenColIds.has(numId) && col) {
-          const colListNameLower = (col.testListName || '').toLowerCase().trim();
-          const colUnitNameLower = (col.unitName || '').toLowerCase().trim();
-          const listMatch = targetListsLower.length === 0 || targetListsLower.includes(colListNameLower);
-          const unitMatch = targetUnitsLower.length === 0 || targetUnitsLower.includes(colUnitNameLower);
-          if (listMatch && unitMatch) {
-            seenColIds.add(numId);
-            matchingCollectionIds.push(numId);
+      // Resolve test list IDs
+      const targetTestListIds = [];
+      const testListIdToName = new Map();
+      if (targetListsLower.length > 0) {
+        for (const [tlId, tlName] of testListMap.entries()) {
+          const numTlId = typeof tlId === 'number' ? tlId : (typeof tlId === 'string' && /^\d+$/.test(tlId) ? parseInt(tlId, 10) : null);
+          if (numTlId !== null && targetListsLower.includes((tlName || '').toLowerCase().trim())) {
+            if (!targetTestListIds.includes(numTlId)) {
+              targetTestListIds.push(numTlId);
+              testListIdToName.set(numTlId, tlName);
+            }
           }
         }
+        try {
+          const dbLists = db.prepare('SELECT id, name FROM test_lists').all();
+          for (const l of dbLists) {
+            if (l.id && targetListsLower.includes((l.name || '').toLowerCase().trim())) {
+              if (!targetTestListIds.includes(l.id)) {
+                targetTestListIds.push(l.id);
+                testListIdToName.set(l.id, l.name);
+              }
+            }
+          }
+        } catch (_) {}
       }
 
-      if (matchingCollectionIds.length > 0) {
-        this.syncStatus.totalCollections = matchingCollectionIds.length;
-        let colIdx = 0;
-        for (const colId of matchingCollectionIds) {
-          if (this.syncStatus.isCancelled) break;
-          colIdx++;
-          const colInfo = utcMap.get(colId);
-          const colLabel = colInfo ? `${colInfo.unitName} (${colInfo.testListName})` : `Collection #${colId}`;
-          this.syncStatus.currentCollection = colLabel;
-          this.syncStatus.currentCollectionIdx = colIdx;
-          this.syncStatus.currentCollectionSynced = 0;
-          this.syncStatus.currentCollectionTotal = null;
-          this.syncStatus.stage = `[${colIdx}/${matchingCollectionIds.length}] Querying ${colLabel}...`;
-          this.updateMemoryStats();
-
-          const queryParams = {
-            unit_test_collection: colId,
-            ordering: '-work_completed'
-          };
-          if (dateFrom) queryParams.work_completed__gte = dateFrom;
-          if (dateTo) queryParams.work_completed__lte = dateTo;
-
-          let colSynced = 0;
-          try {
-            await this.fetchAllPages(endpoints.testListInstancesUrl, queryParams, async (pageBatch, rawData) => {
-              if (pageBatch && pageBatch.length > 0) {
-                processBatch(pageBatch, colInfo);
-                colSynced += pageBatch.length;
-                this.syncStatus.syncedSessions = syncedCount;
-                this.syncStatus.currentCollectionSynced = colSynced;
-                this.syncStatus.currentCollectionTotal = rawData?.count || colSynced;
-                this.syncStatus.stage = `[${colIdx}/${matchingCollectionIds.length}] ${colLabel}: retrieved ${colSynced} of ${rawData?.count || colSynced} records (${syncedCount} total)...`;
-                this.updateMemoryStats();
-                if (limit && syncedCount >= limit) {
-                  this.syncStatus.isCancelled = true;
-                }
-              }
-            });
-          } catch (colErr) {
-            console.warn(`Could not query collection ${colId}:`, colErr.message);
+      // Resolve unit IDs
+      const targetUnitIds = [];
+      const unitIdToName = new Map();
+      if (targetUnitsLower.length > 0) {
+        for (const [uId, uName] of unitMap.entries()) {
+          const numUId = typeof uId === 'number' ? uId : (typeof uId === 'string' && /^\d+$/.test(uId) ? parseInt(uId, 10) : null);
+          if (numUId !== null && targetUnitsLower.includes((uName || '').toLowerCase().trim())) {
+            if (!targetUnitIds.includes(numUId)) {
+              targetUnitIds.push(numUId);
+              unitIdToName.set(numUId, uName);
+            }
           }
+        }
+        try {
+          const dbUnits = db.prepare('SELECT id, name FROM units WHERE active = 1').all();
+          for (const u of dbUnits) {
+            if (u.id && targetUnitsLower.includes((u.name || '').toLowerCase().trim())) {
+              if (!targetUnitIds.includes(u.id)) {
+                targetUnitIds.push(u.id);
+                unitIdToName.set(u.id, u.name);
+              }
+            }
+          }
+        } catch (_) {}
+      }
 
-          if (limit && syncedCount >= limit) break;
+      // Build query targets
+      // When querying by test_list (and unit), QATrack returns ALL scheduled sessions
+      // across all frequencies/collections AND all ad-hoc sessions (where unit_test_collection is null)
+      const queryTargets = [];
+      if (targetTestListIds.length > 0 && targetUnitIds.length > 0) {
+        for (const tlId of targetTestListIds) {
+          for (const uId of targetUnitIds) {
+            queryTargets.push({
+              params: { test_list: tlId, unit: uId },
+              label: `${testListIdToName.get(tlId) || 'List #' + tlId} on ${unitIdToName.get(uId) || 'Unit #' + uId}`
+            });
+          }
+        }
+      } else if (targetTestListIds.length > 0) {
+        for (const tlId of targetTestListIds) {
+          queryTargets.push({
+            params: { test_list: tlId },
+            label: `${testListIdToName.get(tlId) || 'List #' + tlId}`
+          });
+        }
+      } else if (targetUnitIds.length > 0) {
+        for (const uId of targetUnitIds) {
+          queryTargets.push({
+            params: { unit: uId },
+            label: `${unitIdToName.get(uId) || 'Unit #' + uId}`
+          });
         }
       } else {
-        // Fallback when no collections matched directly in utcMap
-        // Attempt to find test list IDs or unit IDs directly
-        let targetTestListIds = [];
-        if (targetListsLower.length > 0) {
-          for (const [tlId, tlName] of testListMap.entries()) {
-            const numTlId = typeof tlId === 'number' ? tlId : (typeof tlId === 'string' && /^\d+$/.test(tlId) ? parseInt(tlId, 10) : null);
-            if (numTlId !== null && targetListsLower.includes((tlName || '').toLowerCase().trim())) {
-              if (!targetTestListIds.includes(numTlId)) targetTestListIds.push(numTlId);
-            }
-          }
-        }
+        queryTargets.push({
+          params: {},
+          label: listLabel || 'All Active QA Records'
+        });
+      }
 
-        let targetUnitIds = [];
-        if (targetUnitsLower.length > 0) {
-          for (const [uId, uName] of unitMap.entries()) {
-            const numUId = typeof uId === 'number' ? uId : (typeof uId === 'string' && /^\d+$/.test(uId) ? parseInt(uId, 10) : null);
-            if (numUId !== null && targetUnitsLower.includes((uName || '').toLowerCase().trim())) {
-              if (!targetUnitIds.includes(numUId)) targetUnitIds.push(numUId);
-            }
-          }
-        }
+      this.syncStatus.totalCollections = queryTargets.length;
+      let qIdx = 0;
+      for (const qt of queryTargets) {
+        if (this.syncStatus.isCancelled) break;
+        qIdx++;
+        const queryParams = {
+          ...qt.params,
+          ordering: '-work_completed'
+        };
+        if (dateFrom) queryParams.work_completed__gte = dateFrom;
+        if (dateTo) queryParams.work_completed__lte = dateTo;
 
-        const queryTargets = [];
-        if (targetTestListIds.length > 0 && targetUnitIds.length > 0) {
-          for (const tlId of targetTestListIds) {
-            for (const uId of targetUnitIds) {
-              queryTargets.push({ test_list: tlId, unit: uId });
-            }
-          }
-        } else if (targetTestListIds.length > 0) {
-          for (const tlId of targetTestListIds) {
-            queryTargets.push({ test_list: tlId });
-          }
-        } else if (targetUnitIds.length > 0) {
-          for (const uId of targetUnitIds) {
-            queryTargets.push({ unit: uId });
-          }
-        } else {
-          queryTargets.push({});
-        }
+        const targetLabel = qt.label;
+        this.syncStatus.currentCollection = targetLabel;
+        this.syncStatus.currentCollectionIdx = qIdx;
+        this.syncStatus.currentCollectionSynced = 0;
+        this.syncStatus.currentCollectionTotal = null;
+        this.syncStatus.stage = `[${qIdx}/${queryTargets.length}] Querying QATrack+ for ${targetLabel}...`;
+        this.updateMemoryStats();
 
-        this.syncStatus.totalCollections = queryTargets.length;
-        let qIdx = 0;
-        for (const qt of queryTargets) {
-          if (this.syncStatus.isCancelled) break;
-          qIdx++;
-          const queryParams = {
-            ...qt,
-            ordering: '-work_completed'
-          };
-          if (dateFrom) queryParams.work_completed__gte = dateFrom;
-          if (dateTo) queryParams.work_completed__lte = dateTo;
-
-          const targetLabel = qt.test_list
-            ? `${testListMap.get(qt.test_list) || 'List #' + qt.test_list}${qt.unit ? ' on ' + (unitMap.get(qt.unit) || 'Unit #' + qt.unit) : ''}`
-            : listLabel;
-
-          this.syncStatus.currentCollection = targetLabel;
-          this.syncStatus.currentCollectionIdx = qIdx;
-          this.syncStatus.currentCollectionSynced = 0;
-          this.syncStatus.currentCollectionTotal = null;
-          this.syncStatus.stage = `[${qIdx}/${queryTargets.length}] Querying QATrack+ for ${targetLabel}...`;
-          this.updateMemoryStats();
-
-          let targetSynced = 0;
-          try {
-            await this.fetchAllPages(endpoints.testListInstancesUrl, queryParams, async (pageBatch, rawData) => {
-              if (pageBatch && pageBatch.length > 0) {
-                const fallbackInfo = {
-                  unitName: (qt.unit ? unitMap.get(qt.unit) : null) || (targetUnits[0] || 'Unknown Machine'),
-                  testListName: (qt.test_list ? testListMap.get(qt.test_list) : null) || (targetLists[0] || 'Patient Specific QA')
-                };
-                processBatch(pageBatch, fallbackInfo);
-                targetSynced += pageBatch.length;
-                this.syncStatus.syncedSessions = syncedCount;
-                this.syncStatus.currentCollectionSynced = targetSynced;
-                this.syncStatus.currentCollectionTotal = rawData?.count || targetSynced;
-                this.syncStatus.stage = `[${qIdx}/${queryTargets.length}] ${targetLabel}: retrieved ${targetSynced} of ${rawData?.count || targetSynced} records (${syncedCount} total)...`;
-                this.updateMemoryStats();
-                if (limit && syncedCount >= limit) {
-                  this.syncStatus.isCancelled = true;
-                }
+        let targetSynced = 0;
+        try {
+          await this.fetchAllPages(endpoints.testListInstancesUrl, queryParams, async (pageBatch, rawData) => {
+            if (pageBatch && pageBatch.length > 0) {
+              processBatch(pageBatch);
+              targetSynced += pageBatch.length;
+              this.syncStatus.syncedSessions = syncedCount;
+              this.syncStatus.currentCollectionSynced = targetSynced;
+              this.syncStatus.currentCollectionTotal = rawData?.count || targetSynced;
+              this.syncStatus.stage = `[${qIdx}/${queryTargets.length}] ${targetLabel}: retrieved ${targetSynced} of ${rawData?.count || targetSynced} records (${syncedCount} total)...`;
+              this.updateMemoryStats();
+              if (limit && syncedCount >= limit) {
+                this.syncStatus.isCancelled = true;
               }
-            });
-          } catch (qErr) {
-            console.warn('Could not query target:', qt, qErr.message);
-          }
-
-          if (limit && syncedCount >= limit) break;
+            }
+          });
+        } catch (qErr) {
+          console.warn('Could not query target:', qt, qErr.message);
         }
+
+        if (limit && syncedCount >= limit) break;
       }
 
       // Reconcile deleted sessions: remove any local sessions in the queried scope that were deleted in QATrack+
@@ -1730,7 +1836,7 @@ class QATrackClient {
     try {
       const endpoints = await this.discoverEndpoints();
       const meta = await this.fetchMetadata(endpoints, options.clearExisting);
-      const { unitMap, testListMap, utiMap, utcMap, testInstanceStatusMap } = meta;
+      const { unitMap, testListMap, utiMap, utcMap, testInstanceStatusMap, testDefMap } = meta;
 
       // 7. Test List Instances (Sessions) - Streaming page-by-page database insert
       const insertSession = db.prepare(`
@@ -1830,10 +1936,13 @@ class QATrackClient {
           const colInfo = utcKey ? (utcMap.get(utcKey) || (typeof utcKey === 'number' && utcMap.get(String(utcKey)))) : null;
           if (colInfo?.unitName) {
             unitName = colInfo.unitName;
-          } else if (unitMap.has(inst.unit)) {
-            unitName = unitMap.get(inst.unit);
-          } else if (typeof inst.unit_name === 'string') {
-            unitName = inst.unit_name;
+          } else {
+            const resolvedUnit = this.resolveUnitName(inst.unit, unitMap);
+            if (resolvedUnit) {
+              unitName = resolvedUnit;
+            } else if (typeof inst.unit_name === 'string') {
+              unitName = inst.unit_name;
+            }
           }
 
           // Do NOT retrieve or ingest non-active units!
@@ -1841,12 +1950,10 @@ class QATrackClient {
             continue;
           }
 
-          // Do NOT retrieve or ingest non-active test list assignments!
-          if (utcKey && !colInfo) {
-            continue;
-          }
-
-          let testListName = colInfo?.testListName || testListMap.get(inst.test_list) || 'Patient Specific QA';
+          let testListName = colInfo?.testListName ||
+            this.resolveTestListName(inst.test_list, testListMap) ||
+            (typeof inst.test_list_name === 'string' && inst.test_list_name ? inst.test_list_name : null) ||
+            'Patient Specific QA';
           const dateStr = (inst.work_completed || inst.work_started || inst.created || new Date().toISOString())
             .replace('T', ' ')
             .substring(0, 19);
@@ -1881,7 +1988,7 @@ class QATrackClient {
                 continue;
               }
 
-              const tiInfo = this.resolveTestInstanceInfo(ti, utiMap);
+              const tiInfo = this.resolveTestInstanceInfo(ti, utiMap, testDefMap);
               const { numVal, strVal } = this.extractTestInstanceValue(ti);
 
               insertTestVal.run(
