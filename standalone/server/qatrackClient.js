@@ -1444,7 +1444,7 @@ class QATrackClient {
             sessionStatus = inst.status_name;
           } else if (typeof inst.status === 'string' && inst.status.trim() && !inst.status.startsWith('http')) {
             sessionStatus = inst.status.trim();
-          } else if (allRejectedTi || hasRejectedTi) {
+          } else if (allRejectedTi) {
             sessionStatus = 'Rejected';
           } else if (inst.in_progress) {
             sessionStatus = 'In Progress';
@@ -1458,21 +1458,11 @@ class QATrackClient {
 
           const statusLower = sessionStatus.toLowerCase();
 
-          // Filter unapproved data if setting is OFF (off by default)
-          if (!effectiveIncludeUnapproved) {
-            if (inst.in_progress || inst.all_reviewed === false || hasUnreviewedTi) {
-              continue;
-            }
-            if (statusLower.includes('unapproved') || statusLower.includes('unreviewed') || statusLower.includes('in progress') || statusLower.includes('pending')) {
-              continue;
-            }
-          }
-
-          // Filter rejected data if setting is OFF (off by default)
-          if (!effectiveIncludeRejected) {
-            if (statusLower.includes('reject') || hasRejectedTi || allRejectedTi) {
-              continue;
-            }
+          // Ingest all sessions into SQLite with their accurate status so the UI can dynamically
+          // toggle unapproved/unreviewed sessions without requiring a re-sync.
+          // Only skip rejected sessions if the server/client specifically excluded rejected data and all tests were rejected.
+          if (!effectiveIncludeRejected && (statusLower.includes('reject') || allRejectedTi)) {
+            continue;
           }
 
           fetchedQATrackIds.add(qatrackId);
@@ -1613,9 +1603,6 @@ class QATrackClient {
               if (!effectiveIncludeRejected && tiStatusInfo.isRejected) {
                 continue;
               }
-              if (!effectiveIncludeUnapproved && tiStatusInfo.requiresReview) {
-                continue;
-              }
 
               const tiInfo = this.resolveTestInstanceInfo(ti, utiMap, testDefMap);
               const { numVal, strVal } = this.extractTestInstanceValue(ti);
@@ -1634,7 +1621,7 @@ class QATrackClient {
               validTiCount++;
             }
 
-            if (validTiCount === 0) {
+            if (rawTestInstances.length > 0 && validTiCount === 0 && !effectiveIncludeRejected) {
               deleteOldValues.run(sess.id);
               db.prepare('DELETE FROM sessions WHERE id = ?').run(sess.id);
               continue;
@@ -1772,20 +1759,29 @@ class QATrackClient {
       }
 
 
-      // 2. Also query by test_list ID (without the unsupported unit parameter) to capture
-      // any ad-hoc QA sessions or instances across all frequencies.
+      // 2. Direct unit filtering via QATrack's DRF native parameters `unit_test_collection__unit` and `unit_test_collection__unit__name`.
+      // NOTE: QATrack+ DRF does NOT filter by ?unit=ID, but natively supports unit_test_collection__unit and unit_test_collection__unit__name.
+      if (targetUnitIds.length > 0) {
+        for (const uId of targetUnitIds) {
+          queryTargets.push({
+            params: { unit_test_collection__unit: uId },
+            label: `${unitIdToName.get(uId) || 'Unit #' + uId} (All QA Sessions via unit ID)`
+          });
+        }
+      }
+      for (const uName of targetUnits) {
+        queryTargets.push({
+          params: { unit_test_collection__unit__name: uName },
+          label: `${uName} (All QA Sessions via unit name)`
+        });
+      }
+
+      // 3. Query by test_list ID to capture any ad-hoc QA sessions or instances across all frequencies.
       if (targetTestListIds.length > 0) {
         for (const tlId of targetTestListIds) {
           queryTargets.push({
             params: { test_list: tlId },
             label: `${testListIdToName.get(tlId) || 'List #' + tlId} (All instances)`
-          });
-        }
-      } else if (targetUnitIds.length > 0 && queryTargets.length === 0) {
-        for (const uId of targetUnitIds) {
-          queryTargets.push({
-            params: { unit: uId },
-            label: `${unitIdToName.get(uId) || 'Unit #' + uId}`
           });
         }
       }
@@ -1797,9 +1793,20 @@ class QATrackClient {
         });
       }
 
-      this.syncStatus.totalCollections = queryTargets.length;
-      let qIdx = 0;
+      // Deduplicate query targets by parameters to avoid redundant network queries
+      const uniqueTargets = [];
+      const seenTargetParams = new Set();
       for (const qt of queryTargets) {
+        const key = JSON.stringify(qt.params);
+        if (!seenTargetParams.has(key)) {
+          seenTargetParams.add(key);
+          uniqueTargets.push(qt);
+        }
+      }
+
+      this.syncStatus.totalCollections = uniqueTargets.length;
+      let qIdx = 0;
+      for (const qt of uniqueTargets) {
         if (this.syncStatus.isCancelled) break;
         qIdx++;
         const queryParams = {
@@ -1841,8 +1848,9 @@ class QATrackClient {
       }
 
       // Reconcile deleted sessions: remove any local sessions in the queried scope that were deleted in QATrack+
+      // NOTE: Only perform deletion if QATrack actually returned records (fetchedQATrackIds.size > 0) to avoid wiping local data on transient query misses.
       let deletedSessionsCount = 0;
-      if (!this.syncStatus.isCancelled) {
+      if (!this.syncStatus.isCancelled && fetchedQATrackIds.size > 0) {
         try {
           let selectSql = 'SELECT id, qatrack_instance_id FROM sessions WHERE qatrack_instance_id IS NOT NULL';
           const selectParams = [];
@@ -1851,14 +1859,10 @@ class QATrackClient {
             selectParams.push(...targetListsLower);
           }
           if (targetUnitsLower.length > 0) {
-            selectSql += ` AND LOWER(unit_name) IN (${targetUnitsLower.map(() => '?').join(',')})`;
-            selectParams.push(...targetUnitsLower);
-          }
-          if (!effectiveIncludeUnapproved) {
-            selectSql += " AND LOWER(status) NOT IN ('unapproved', 'unreviewed', 'in progress', 'pending')";
-          }
-          if (!effectiveIncludeRejected) {
-            selectSql += " AND LOWER(status) NOT LIKE '%reject%'";
+            const uMatchPlaceholders1 = targetUnitsLower.map(() => '?').join(',');
+            const uMatchPlaceholders2 = targetUnitsClean.map(() => '?').join(',');
+            selectSql += ` AND (LOWER(unit_name) IN (${uMatchPlaceholders1}) OR REPLACE(REPLACE(REPLACE(LOWER(TRIM(unit_name)), ' ', ''), '-', ''), '_', '') IN (${uMatchPlaceholders2}))`;
+            selectParams.push(...targetUnitsLower, ...targetUnitsClean);
           }
           if (dateFrom) {
             selectSql += ' AND work_completed >= ?';
@@ -2031,7 +2035,7 @@ class QATrackClient {
             sessionStatus = inst.status_name;
           } else if (typeof inst.status === 'string' && inst.status.trim() && !inst.status.startsWith('http')) {
             sessionStatus = inst.status.trim();
-          } else if (allRejectedTi || hasRejectedTi) {
+          } else if (allRejectedTi) {
             sessionStatus = 'Rejected';
           } else if (inst.in_progress) {
             sessionStatus = 'In Progress';
@@ -2045,21 +2049,11 @@ class QATrackClient {
 
           const statusLower = sessionStatus.toLowerCase();
 
-          // Filter unapproved data if setting is OFF (off by default)
-          if (!effectiveIncludeUnapproved) {
-            if (inst.in_progress || inst.all_reviewed === false || hasUnreviewedTi) {
-              continue;
-            }
-            if (statusLower.includes('unapproved') || statusLower.includes('unreviewed') || statusLower.includes('in progress') || statusLower.includes('pending')) {
-              continue;
-            }
-          }
-
-          // Filter rejected data if setting is OFF (off by default)
-          if (!effectiveIncludeRejected) {
-            if (statusLower.includes('reject') || hasRejectedTi || allRejectedTi) {
-              continue;
-            }
+          // Ingest all sessions into SQLite with their accurate status so the UI can dynamically
+          // toggle unapproved/unreviewed sessions without requiring a re-sync.
+          // Only skip rejected sessions if the server/client specifically excluded rejected data and all tests were rejected.
+          if (!effectiveIncludeRejected && (statusLower.includes('reject') || allRejectedTi)) {
+            continue;
           }
 
           fetchedQATrackIds.add(qatrackId);
@@ -2099,10 +2093,7 @@ class QATrackClient {
             }
           }
 
-          // Do NOT retrieve or ingest non-active units UNLESS unit exists in units database
-          const uLower = unitName.toLowerCase().trim();
-          const uClean = uLower.replace(/[\s-_]/g, '');
-          if (activeUnitNames.size > 0 && !activeUnitNames.has(uLower) && !activeUnitNames.has(uClean)) {
+          if (!unitName || unitName === 'Unknown Machine') {
             continue;
           }
 
@@ -2140,9 +2131,6 @@ class QATrackClient {
               if (!effectiveIncludeRejected && tiStatusInfo.isRejected) {
                 continue;
               }
-              if (!effectiveIncludeUnapproved && tiStatusInfo.requiresReview) {
-                continue;
-              }
 
               const tiInfo = this.resolveTestInstanceInfo(ti, utiMap, testDefMap);
               const { numVal, strVal } = this.extractTestInstanceValue(ti);
@@ -2161,7 +2149,7 @@ class QATrackClient {
               validTiCount++;
             }
 
-            if (validTiCount === 0) {
+            if (rawTestInstances.length > 0 && validTiCount === 0 && !effectiveIncludeRejected) {
               deleteOldValues.run(sess.id);
               db.prepare('DELETE FROM sessions WHERE id = ?').run(sess.id);
               continue;
@@ -2184,15 +2172,9 @@ class QATrackClient {
 
       // Reconcile deleted sessions on full sync: remove any local sessions that are no longer returned by QATrack+
       let deletedSessionsCount = 0;
-      if (!this.syncStatus.isCancelled) {
+      if (!this.syncStatus.isCancelled && fetchedQATrackIds.size > 0) {
         try {
           let selectSql = 'SELECT id, qatrack_instance_id FROM sessions WHERE qatrack_instance_id IS NOT NULL';
-          if (!effectiveIncludeUnapproved) {
-            selectSql += " AND LOWER(status) NOT IN ('unapproved', 'unreviewed', 'in progress', 'pending')";
-          }
-          if (!effectiveIncludeRejected) {
-            selectSql += " AND LOWER(status) NOT LIKE '%reject%'";
-          }
           const allDbSessions = db.prepare(selectSql).all();
           const toDeleteIds = allDbSessions
             .filter(s => !fetchedQATrackIds.has(s.qatrack_instance_id) && !fetchedQATrackIds.has(Number(s.qatrack_instance_id)))

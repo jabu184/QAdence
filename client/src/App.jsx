@@ -842,11 +842,11 @@ export default function App() {
       targetLists = targetLists.filter(l => l !== 'General QA');
     }
 
-    // Collect specific units if specified in active datasets (strictly active units only)
+    // Collect specific units if specified in active datasets (preserve explicit selections)
     const specifiedUnits = [...new Set(activeDatasets.flatMap(d => d.units || []))];
-    const activeUnitNames = new Set(units.filter(u => u.active !== 0).map(u => u.name));
-    const allUnits = (specifiedUnits.length > 0 ? specifiedUnits : units.map(u => u.name))
-      .filter(u => activeUnitNames.has(u));
+    const allUnits = specifiedUnits.length > 0
+      ? specifiedUnits
+      : units.filter(u => u.active !== 0).map(u => u.name);
 
     // Collect date boundaries across active datasets if specified
     const dateFroms = activeDatasets.map(d => d.dateFrom).filter(Boolean);
