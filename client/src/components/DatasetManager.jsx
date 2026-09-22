@@ -41,6 +41,8 @@ export default function DatasetManager({
   onChangeSelectedTestList,
   includeAllInstances = true,
   onChangeIncludeAllInstances,
+  includeUnapproved = true,
+  onChangeIncludeUnapproved,
   displayMode,
   onChangeDisplayMode,
   trendlineConfig,
@@ -103,6 +105,16 @@ export default function DatasetManager({
               <label style={{ fontSize: '0.78rem', fontWeight: '700', color: '#1e293b' }}>
                 Measurement Variable (Y-Axis) *
               </label>
+              {onChangeIncludeUnapproved && (
+                <label style={{ fontSize: '0.72rem', color: includeUnapproved ? '#2563eb' : '#64748b', fontWeight: '600', display: 'flex', alignItems: 'center', gap: '4px', cursor: 'pointer' }} title="Include unreviewed / pending clinical sessions from QATrack+">
+                  <input
+                    type="checkbox"
+                    checked={includeUnapproved}
+                    onChange={(e) => onChangeIncludeUnapproved(e.target.checked)}
+                  />
+                  Unreviewed
+                </label>
+              )}
             </div>
             <SearchableVariableSelect
               value={{ list: selectedTestList, name: yVariable }}

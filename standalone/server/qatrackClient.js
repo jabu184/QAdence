@@ -329,6 +329,7 @@ class QATrackClient {
       unitClassesUrl: unitsEndpoints.unitclasses || `${this.baseUrl}/api/units/unitclasses/`,
       unitTypesUrl: unitsEndpoints.unittypes || `${this.baseUrl}/api/units/unittypes/`,
       testListsUrl: qcEndpoints.testlists || qcEndpoints['test-lists'] || `${this.baseUrl}/api/qc/testlists/`,
+      testListCyclesUrl: qcEndpoints.testlistcycles || qcEndpoints['test-list-cycles'] || `${this.baseUrl}/api/qc/testlistcycles/`,
       testsUrl: qcEndpoints.tests || `${this.baseUrl}/api/qc/tests/`,
       unitTestInfosUrl: qcEndpoints.unittestinfos || qcEndpoints['unit-test-infos'] || `${this.baseUrl}/api/qc/unittestinfos/`,
       unitTestCollectionsUrl: qcEndpoints.unittestcollections || qcEndpoints['unit-test-collections'] || `${this.baseUrl}/api/qc/unittestcollections/`,
@@ -623,7 +624,79 @@ class QATrackClient {
       }
     }
 
-    // 5. Unit Test Collections (filter out non-active assignments)
+    // 5. Test Lists & Test List Cycles
+    this.syncStatus.stage = 'Fetching QA Test Lists & Cycles...';
+    this.updateMemoryStats();
+
+    let testLists = [];
+    try {
+      testLists = await this.fetchAllPages(endpoints.testListsUrl);
+    } catch (e) {
+      console.warn('Warning: Could not fetch test lists:', e.message);
+    }
+
+    let testListCycles = [];
+    if (endpoints.testListCyclesUrl) {
+      try {
+        testListCycles = await this.fetchAllPages(endpoints.testListCyclesUrl);
+      } catch (e) {
+        console.warn('Warning: Could not fetch test list cycles:', e.message);
+      }
+    }
+
+    const testListMap = new Map();
+    const insertTestList = db.prepare(`
+      INSERT OR REPLACE INTO test_lists (id, name, slug, description)
+      VALUES (?, ?, ?, ?)
+    `);
+
+    for (const tl of testLists) {
+      const id = tl.id || this.extractIdFromUrl(tl.url);
+      const name = tl.name;
+      if (!name) continue;
+
+      try {
+        insertTestList.run(id, name, tl.slug || '', tl.description || '');
+      } catch (_) {}
+
+      if (id) {
+        testListMap.set(id, name);
+        testListMap.set(String(id), name);
+      }
+      if (tl.url) {
+        testListMap.set(tl.url, name);
+        testListMap.set(tl.url.replace(/\/$/, ''), name);
+        const relUrl = tl.url.replace(/^https?:\/\/[^\/]+/, '');
+        testListMap.set(relUrl, name);
+        testListMap.set(relUrl.replace(/\/$/, ''), name);
+      }
+    }
+
+    // Register cycles in testListMap
+    for (const cyc of testListCycles) {
+      const id = cyc.id || this.extractIdFromUrl(cyc.url);
+      const name = cyc.name;
+      if (!name) continue;
+
+      try {
+        insertTestList.run(id ? 100000 + Number(id) : null, name, cyc.slug || '', cyc.description || '');
+      } catch (_) {}
+
+      if (id) {
+        testListMap.set(id, name);
+        testListMap.set(String(id), name);
+        testListMap.set(`cycle-${id}`, name);
+      }
+      if (cyc.url) {
+        testListMap.set(cyc.url, name);
+        testListMap.set(cyc.url.replace(/\/$/, ''), name);
+        const relUrl = cyc.url.replace(/^https?:\/\/[^\/]+/, '');
+        testListMap.set(relUrl, name);
+        testListMap.set(relUrl.replace(/\/$/, ''), name);
+      }
+    }
+
+    // 6. Unit Test Collections (filter out non-active assignments)
     this.syncStatus.stage = 'Fetching Unit Test Collections...';
     this.updateMemoryStats();
 
@@ -653,8 +726,19 @@ class QATrackClient {
 
       const rawTl = c.tests_object || c.test_list || c.testlist || c.tests;
       const tlId = typeof rawTl === 'number' ? rawTl : (this.extractIdFromUrl(rawTl) || (typeof rawTl === 'string' && /^\d+$/.test(rawTl) ? parseInt(rawTl, 10) : null));
-      const testListName = (tlId && (typeof tlId === 'number' ? String(tlId) : '')) ||
-                           c.name || 'Unknown Test List';
+
+      let testListName = '';
+      if (tlId && testListMap.has(tlId)) {
+        testListName = testListMap.get(tlId);
+      } else if (rawTl && testListMap.has(rawTl)) {
+        testListName = testListMap.get(rawTl);
+      } else if (c.name && typeof c.name === 'string') {
+        testListName = c.name;
+      } else if (tlId) {
+        testListName = typeof tlId === 'number' ? `List #${tlId}` : String(tlId);
+      } else {
+        testListName = 'Unknown Test List';
+      }
 
       // Check whether assignment is active AND assigned unit is active
       const isUtcActive = (c.active !== undefined) ? Boolean(c.active) : ((c.is_active !== undefined) ? Boolean(c.is_active) : true);
@@ -675,67 +759,20 @@ class QATrackClient {
       if (tlId) activeAssignedTestListIds.add(tlId);
       if (testListName) activeAssignedTestListNames.add(testListName.toLowerCase().trim());
 
-      const colInfo = { unitName, testListName, unitId: uId, testListId: tlId, active: true };
+      const colInfo = {
+        unitName,
+        testListName,
+        unitId: uId,
+        testListId: tlId,
+        active: true,
+        frequency: typeof c.frequency === 'number' ? c.frequency : (this.extractIdFromUrl(c.frequency) || null),
+        assignedTo: typeof c.assigned_to === 'number' ? c.assigned_to : (this.extractIdFromUrl(c.assigned_to) || null)
+      };
       if (id) {
         utcMap.set(id, colInfo);
         utcMap.set(String(id), colInfo);
       }
       if (c.url) utcMap.set(c.url, colInfo);
-    }
-
-    // 6. Test Lists (filter out test lists with no data and no active assignments)
-    this.syncStatus.stage = 'Fetching QA Test Lists...';
-    this.updateMemoryStats();
-
-    let testLists = [];
-    try {
-      testLists = await this.fetchAllPages(endpoints.testListsUrl);
-    } catch (e) {
-      console.warn('Warning: Could not fetch test lists:', e.message);
-    }
-
-    const testListMap = new Map();
-    const insertTestList = db.prepare(`
-      INSERT OR REPLACE INTO test_lists (id, name, slug, description)
-      VALUES (?, ?, ?, ?)
-    `);
-
-    // Check what test lists have data in existing sessions
-    const existingSessionLists = new Set(
-      db.prepare("SELECT DISTINCT test_list_name FROM sessions WHERE test_list_name IS NOT NULL AND test_list_name != ''").all()
-        .map(r => r.test_list_name.toLowerCase().trim())
-    );
-
-    for (const tl of testLists) {
-      const id = tl.id || this.extractIdFromUrl(tl.url);
-      const name = tl.name;
-      if (!name) continue;
-
-      try {
-        insertTestList.run(id, name, tl.slug || '', tl.description || '');
-      } catch (_) {}
-
-      if (id) {
-        testListMap.set(id, name);
-        testListMap.set(String(id), name);
-      }
-      if (tl.url) {
-        testListMap.set(tl.url, name);
-        testListMap.set(tl.url.replace(/\/$/, ''), name);
-        const relUrl = tl.url.replace(/^https?:\/\/[^\/]+/, '');
-        testListMap.set(relUrl, name);
-        testListMap.set(relUrl.replace(/\/$/, ''), name);
-      }
-    }
-
-    // Update test_list_name in utcMap and insertUtc where resolved from testListMap
-    for (const [colId, colInfo] of utcMap.entries()) {
-      if (colInfo.testListId && testListMap.has(colInfo.testListId)) {
-        colInfo.testListName = testListMap.get(colInfo.testListId);
-        try {
-          db.prepare('UPDATE unit_test_collections SET test_list_name = ? WHERE id = ?').run(colInfo.testListName, colId);
-        } catch (_) {}
-      }
     }
 
     // Map test lists by ID and URL for recursive sublist traversal
@@ -1634,33 +1671,55 @@ class QATrackClient {
       }
 
       // Build query targets
-      // When querying by test_list (and unit), QATrack returns ALL scheduled sessions
-      // across all frequencies/collections AND all ad-hoc sessions (where unit_test_collection is null)
+      // 1. Target all matching active unit_test_collections for the requested units & test lists.
+      // In QATrack+, scheduled QA across different frequencies (weekly, monthly, etc.) and groups
+      // has distinct unit_test_collection IDs. Querying by unit_test_collection ensures every
+      // frequency/group is explicitly retrieved from the server.
       const queryTargets = [];
-      if (targetTestListIds.length > 0 && targetUnitIds.length > 0) {
-        for (const tlId of targetTestListIds) {
-          for (const uId of targetUnitIds) {
-            queryTargets.push({
-              params: { test_list: tlId, unit: uId },
-              label: `${testListIdToName.get(tlId) || 'List #' + tlId} on ${unitIdToName.get(uId) || 'Unit #' + uId}`
-            });
-          }
+      const matchedUtcIds = new Set();
+
+      for (const [colKey, colInfo] of utcMap.entries()) {
+        const numColId = typeof colKey === 'number' ? colKey : (typeof colKey === 'string' && /^\d+$/.test(colKey) ? parseInt(colKey, 10) : null);
+        if (!numColId || matchedUtcIds.has(numColId)) continue;
+        if (!colInfo.active) continue;
+
+        const uMatch = targetUnitsLower.length === 0 ||
+          (colInfo.unitName && targetUnitsLower.includes(colInfo.unitName.toLowerCase().trim())) ||
+          (colInfo.unitId && targetUnitIds.includes(colInfo.unitId));
+
+        const tlMatch = targetListsLower.length === 0 ||
+          (colInfo.testListName && targetListsLower.includes(colInfo.testListName.toLowerCase().trim())) ||
+          (colInfo.testListId && targetTestListIds.includes(colInfo.testListId));
+
+        if (uMatch && tlMatch) {
+          matchedUtcIds.add(numColId);
+          queryTargets.push({
+            params: { unit_test_collection: numColId },
+            label: `${colInfo.testListName || 'Collection'} on ${colInfo.unitName || 'Unit'} (UTC #${numColId})`,
+            colInfo
+          });
         }
-      } else if (targetTestListIds.length > 0) {
+      }
+
+      // 2. Also query by test_list ID (without the unsupported unit parameter) to capture
+      // any ad-hoc QA sessions or instances across all frequencies.
+      if (targetTestListIds.length > 0) {
         for (const tlId of targetTestListIds) {
           queryTargets.push({
             params: { test_list: tlId },
-            label: `${testListIdToName.get(tlId) || 'List #' + tlId}`
+            label: `${testListIdToName.get(tlId) || 'List #' + tlId} (All instances)`
           });
         }
-      } else if (targetUnitIds.length > 0) {
+      } else if (targetUnitIds.length > 0 && queryTargets.length === 0) {
         for (const uId of targetUnitIds) {
           queryTargets.push({
             params: { unit: uId },
             label: `${unitIdToName.get(uId) || 'Unit #' + uId}`
           });
         }
-      } else {
+      }
+
+      if (queryTargets.length === 0) {
         queryTargets.push({
           params: {},
           label: listLabel || 'All Active QA Records'
@@ -1691,7 +1750,7 @@ class QATrackClient {
         try {
           await this.fetchAllPages(endpoints.testListInstancesUrl, queryParams, async (pageBatch, rawData) => {
             if (pageBatch && pageBatch.length > 0) {
-              processBatch(pageBatch);
+              processBatch(pageBatch, qt.colInfo);
               targetSynced += pageBatch.length;
               this.syncStatus.syncedSessions = syncedCount;
               this.syncStatus.currentCollectionSynced = targetSynced;
@@ -1723,6 +1782,12 @@ class QATrackClient {
           if (targetUnitsLower.length > 0) {
             selectSql += ` AND LOWER(unit_name) IN (${targetUnitsLower.map(() => '?').join(',')})`;
             selectParams.push(...targetUnitsLower);
+          }
+          if (!effectiveIncludeUnapproved) {
+            selectSql += " AND LOWER(status) NOT IN ('unapproved', 'unreviewed', 'in progress', 'pending')";
+          }
+          if (!effectiveIncludeRejected) {
+            selectSql += " AND LOWER(status) NOT LIKE '%reject%'";
           }
           if (dateFrom) {
             selectSql += ' AND work_completed >= ?';
@@ -2030,7 +2095,14 @@ class QATrackClient {
       let deletedSessionsCount = 0;
       if (!this.syncStatus.isCancelled) {
         try {
-          const allDbSessions = db.prepare('SELECT id, qatrack_instance_id FROM sessions WHERE qatrack_instance_id IS NOT NULL').all();
+          let selectSql = 'SELECT id, qatrack_instance_id FROM sessions WHERE qatrack_instance_id IS NOT NULL';
+          if (!effectiveIncludeUnapproved) {
+            selectSql += " AND LOWER(status) NOT IN ('unapproved', 'unreviewed', 'in progress', 'pending')";
+          }
+          if (!effectiveIncludeRejected) {
+            selectSql += " AND LOWER(status) NOT LIKE '%reject%'";
+          }
+          const allDbSessions = db.prepare(selectSql).all();
           const toDeleteIds = allDbSessions
             .filter(s => !fetchedQATrackIds.has(s.qatrack_instance_id) && !fetchedQATrackIds.has(Number(s.qatrack_instance_id)))
             .map(s => s.id);

@@ -340,6 +340,29 @@ export default function App() {
     }
   }, [selectedTestList, tests, yVariable]);
 
+  const handleToggleIncludeUnapproved = useCallback(async (checked) => {
+    try {
+      const res = await fetch('/api/config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          baseUrl: status?.qatrack?.baseUrl,
+          token: status?.qatrack?.hasToken ? undefined : '',
+          authType: status?.qatrack?.authType,
+          includeUnapproved: checked,
+          includeRejected: status?.qatrack?.includeRejected
+        })
+      });
+      if (res.ok) {
+        queryCacheRef.current.clear();
+        await loadMetadata();
+        runAllQueries();
+      }
+    } catch (err) {
+      console.error('Failed to update includeUnapproved setting:', err);
+    }
+  }, [status, loadMetadata, runAllQueries]);
+
   // In-memory query cache for instantaneous preset toggling and repeated local queries
   const queryCacheRef = useRef(new Map());
 
@@ -350,7 +373,7 @@ export default function App() {
     const uKey = (ds.units || []).slice().sort().join(',');
     const tlKey = effLists.slice().sort().join(',');
     const fKey = (ds.filters || []).map(f => `${f.testName}:${f.operator}:${f.value}`).join(';');
-    return `${effectiveY}|${effectiveX || 'work_completed'}|${effectiveIncludeAll ? '1' : '0'}|${effectiveSelectedTestList || ''}|${uKey}|${tlKey}|${ds.dateFrom || ''}|${ds.dateTo || ''}|${fKey}`;
+    return `${effectiveY}|${effectiveX || 'work_completed'}|${effectiveIncludeAll ? '1' : '0'}|${effectiveSelectedTestList || ''}|${status?.qatrack?.includeUnapproved ? '1' : '0'}|${uKey}|${tlKey}|${ds.dateFrom || ''}|${ds.dateTo || ''}|${fKey}`;
   };
 
   // Execute Queries for all Datasets (Local SQLite + In-Memory Cache)
@@ -361,96 +384,102 @@ export default function App() {
       yVariable: overrideY,
       xVariable: overrideX,
       selectedTestList: overrideTestList,
-      includeAllInstances: overrideIncludeAll,
-      forceRefresh = false
+      includeAllInstances: overrideIncludeAll
     } = options;
 
-    const activeDatasets = overrideDatasets || datasets;
-    const effectiveY = overrideY || yVariable;
+    const effDatasets = overrideDatasets || datasets;
+    const effectiveY = overrideY !== undefined ? overrideY : yVariable;
     const effectiveX = overrideX !== undefined ? overrideX : xVariable;
     const effectiveSelectedTestList = overrideTestList !== undefined ? overrideTestList : selectedTestList;
     const effectiveIncludeAll = overrideIncludeAll !== undefined ? overrideIncludeAll : includeAllInstances;
 
-    if (!effectiveY || activeDatasets.length === 0) return { totalPoints: 0, needsPull: false };
+    if (!effectiveY) return null;
+
     setIsLoading(true);
-
     try {
-      const ignoredSet = new Set(ignoredSessionIds);
-      const isDateX = !effectiveX || effectiveX === 'work_completed';
-
-      const resultsMap = {};
-      let totalPoints = 0;
+      const activeDatasets = effDatasets.filter(d => d.visible !== false);
       let anyNeedsPull = false;
+      let totalPoints = 0;
+      const nextResults = {};
 
-      await Promise.all(
-        activeDatasets.map(async ds => {
-          const cacheKey = getQueryCacheKey(ds, effectiveX, effectiveY, effectiveSelectedTestList, effectiveIncludeAll);
-          let allPts = [];
-          let tableRows = [];
-          let needsPull = false;
+      for (const ds of effDatasets) {
+        if (ds.visible === false) continue;
 
-          if (!forceRefresh && queryCacheRef.current.has(cacheKey)) {
-            const cached = queryCacheRef.current.get(cacheKey);
-            allPts = cached.dataPoints || [];
-            tableRows = cached.tableRows || [];
-            needsPull = cached.needsPull || false;
-          } else {
-            const effectiveTestLists = !effectiveIncludeAll && effectiveSelectedTestList
-              ? [effectiveSelectedTestList]
-              : (ds.testLists || []);
+      let allPts = [];
+      let tableRows = [];
+      let needsPull = false;
 
-            const res = await fetch('/api/query', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                units: ds.units,
-                testLists: effectiveTestLists,
-                testList: !effectiveIncludeAll ? effectiveSelectedTestList : '',
-                includeAllInstances: effectiveIncludeAll,
-                dateFrom: ds.dateFrom,
-                dateTo: ds.dateTo,
-                filters: ds.filters,
-                xVariable: effectiveX,
-                yVariable: effectiveY,
-                pullOnDemand
-              })
-            });
-            const data = await res.json();
-            allPts = data.dataPoints || [];
-            tableRows = data.tableRows || [];
-            needsPull = Boolean(data.needsPull);
+      const cacheKey = getQueryCacheKey(ds, effectiveX, effectiveY, effectiveSelectedTestList, effectiveIncludeAll);
 
-            queryCacheRef.current.set(cacheKey, {
-              dataPoints: allPts,
-              tableRows,
-              needsPull
-            });
-          }
+      if (queryCacheRef.current.has(cacheKey)) {
+        const cached = queryCacheRef.current.get(cacheKey);
+        allPts = cached.dataPoints;
+        tableRows = cached.tableRows;
+        needsPull = cached.needsPull;
+      } else {
+        try {
+          const effectiveTestLists = !effectiveIncludeAll && effectiveSelectedTestList
+            ? [effectiveSelectedTestList]
+            : (ds.testLists || []);
 
-          if (needsPull) anyNeedsPull = true;
-          totalPoints += allPts.length;
+          const res = await fetch('/api/query', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              units: ds.units,
+              testLists: effectiveTestLists,
+              testList: !effectiveIncludeAll ? effectiveSelectedTestList : '',
+              includeAllInstances: effectiveIncludeAll,
+              includeUnapproved: status?.qatrack?.includeUnapproved ?? true,
+              includeRejected: status?.qatrack?.includeRejected ?? false,
+              dateFrom: ds.dateFrom,
+              dateTo: ds.dateTo,
+              filters: ds.filters,
+              xVariable: effectiveX,
+              yVariable: effectiveY,
+              pullOnDemand
+            })
+          });
+          const data = await res.json();
+          allPts = data.dataPoints || [];
+          tableRows = data.tableRows || [];
+          needsPull = Boolean(data.needsPull);
 
-          const activePts = allPts.filter(p => !ignoredSet.has(p.sessionId));
-          const yVals = activePts.map(p => p.y).filter(v => typeof v === 'number' && !isNaN(v));
-
-          const stats = calculateStats(yVals);
-          const regression = computeLinearRegression(activePts, isDateX);
-
-          resultsMap[ds.id] = {
+          queryCacheRef.current.set(cacheKey, {
             dataPoints: allPts,
-            tableRows: tableRows.map(r => ({
-              ...r,
-              datasetName: ds.name,
-              datasetColor: ds.color
-            })),
-            stats,
-            regression,
-            ignoredCount: allPts.length - activePts.length
-          };
-        })
-      );
+            tableRows,
+            needsPull
+          });
+        } catch (err) {
+          console.error('Query error:', err);
+        }
+      }
 
-      setDatasetResults(resultsMap);
+      if (needsPull) anyNeedsPull = true;
+      totalPoints += allPts.length;
+
+      const ignoredSet = new Set(ignoredSessionIds);
+      const activePts = allPts.filter(p => !ignoredSet.has(p.sessionId));
+      const yVals = activePts.map(p => p.y).filter(v => typeof v === 'number' && !isNaN(v));
+
+      const stats = calculateStats(yVals);
+      const isDateX = !effectiveX || effectiveX === 'work_completed';
+      const regression = computeLinearRegression(activePts, isDateX);
+
+      nextResults[ds.id] = {
+        dataPoints: allPts,
+        tableRows: tableRows.map(r => ({
+          ...r,
+          datasetName: ds.name,
+          datasetColor: ds.color
+        })),
+        stats,
+        regression,
+        ignoredCount: allPts.length - activePts.length
+      };
+    }
+
+    setDatasetResults(nextResults);
       loadedConfigRef.current = JSON.stringify({
         xVariable: effectiveX,
         yVariable: effectiveY,
@@ -803,8 +832,6 @@ export default function App() {
     let targetLists = [];
     if (!effectiveIncludeAll && effectiveTestList) {
       targetLists = [effectiveTestList];
-    } else if (effectiveTestList) {
-      targetLists = [effectiveTestList];
     } else {
       const matchingDefs = tests.filter(t => t.name === effectiveY);
       targetLists = [...new Set(matchingDefs.map(t => t.testList).filter(Boolean))];
@@ -837,6 +864,8 @@ export default function App() {
       dateFrom: minDateFrom,
       dateTo: maxDateTo,
       yVariable: effectiveY,
+      includeUnapproved: options.includeUnapproved !== undefined ? options.includeUnapproved : (status?.qatrack?.includeUnapproved ?? true),
+      includeRejected: options.includeRejected !== undefined ? options.includeRejected : (status?.qatrack?.includeRejected ?? false),
       limit: null
     });
   }, [yVariable, status, includeAllInstances, selectedTestList, tests, datasets, units, handleSync]);
@@ -1027,6 +1056,8 @@ export default function App() {
           onChangeSelectedTestList={setSelectedTestList}
           includeAllInstances={includeAllInstances}
           onChangeIncludeAllInstances={handleToggleIncludeAllInstances}
+          includeUnapproved={status?.qatrack?.includeUnapproved ?? true}
+          onChangeIncludeUnapproved={handleToggleIncludeUnapproved}
           displayMode={displayMode}
           onChangeDisplayMode={setDisplayMode}
           trendlineConfig={trendlineConfig}

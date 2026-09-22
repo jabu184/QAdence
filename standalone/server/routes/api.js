@@ -433,11 +433,18 @@ router.post('/query', async (req, res) => {
     let sessionWhereClauses = [];
     let sessionParams = [];
 
-    // Filter rejected & unapproved sessions if settings are off
-    if (!qConfig.includeRejected) {
+    // Filter rejected & unapproved sessions (respecting per-request override or server setting)
+    const effectiveIncludeUnapproved = req.body.includeUnapproved !== undefined
+      ? Boolean(req.body.includeUnapproved)
+      : qConfig.includeUnapproved;
+    const effectiveIncludeRejected = req.body.includeRejected !== undefined
+      ? Boolean(req.body.includeRejected)
+      : qConfig.includeRejected;
+
+    if (!effectiveIncludeRejected) {
       sessionWhereClauses.push(`(s.status IS NULL OR LOWER(s.status) NOT LIKE '%reject%')`);
     }
-    if (!qConfig.includeUnapproved) {
+    if (!effectiveIncludeUnapproved) {
       sessionWhereClauses.push(`(s.status IS NULL OR LOWER(s.status) NOT IN ('unapproved', 'unreviewed', 'in progress', 'pending'))`);
     }
 
@@ -558,10 +565,10 @@ router.post('/query', async (req, res) => {
       FROM test_values
       WHERE session_id IN (${idPlaceholders})
     `;
-    if (!qConfig.includeRejected) {
+    if (!effectiveIncludeRejected) {
       valuesQuery += ` AND (status IS NULL OR LOWER(status) NOT LIKE '%reject%')`;
     }
-    if (!qConfig.includeUnapproved) {
+    if (!effectiveIncludeUnapproved) {
       valuesQuery += ` AND (status IS NULL OR LOWER(status) NOT IN ('unapproved', 'unreviewed', 'in progress', 'pending'))`;
     }
     const testValues = db.prepare(valuesQuery).all(...sessionIds);
