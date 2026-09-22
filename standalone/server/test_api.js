@@ -589,6 +589,35 @@ const server = app.listen(5099, async () => {
       throw new Error(`Expected 1 matched point for Weekly Linac QA, got ${weeklyScopedRes.data.matchedPoints}`);
     }
 
+    // Add Session 104: Monthly Physics session with Unapproved status and Unreviewed test value
+    const sMonthlyUnapproved = db.prepare(`INSERT INTO sessions (qatrack_instance_id, unit_id, unit_name, test_list_name, work_completed, created_by, status) VALUES (104, 1, 'TrueBeam 1', 'Monthly Linac QA', '2026-02-18 10:00:00', 'Physicist', 'Unapproved')`).run().lastInsertRowid;
+    db.prepare(`INSERT INTO test_values (session_id, test_name, test_slug, value_string, value_numeric, unit, status) VALUES (?, 'Output 6MV', 'output_6mv', '100.5', 100.5, '%', 'Unreviewed')`).run(sMonthlyUnapproved);
+
+    // When includeUnapproved is false (default), sMonthlyUnapproved is excluded
+    const queryWithoutUnapproved = await axios.post(`${base}/query`, {
+      yVariable: 'Output 6MV',
+      includeAllInstances: true,
+      includeUnapproved: false
+    });
+    if (queryWithoutUnapproved.data.matchedPoints !== 3) {
+      throw new Error(`Expected 3 matched points when includeUnapproved is false, got ${queryWithoutUnapproved.data.matchedPoints}`);
+    }
+
+    // When includeUnapproved is true, sMonthlyUnapproved is included
+    const queryWithUnapproved = await axios.post(`${base}/query`, {
+      yVariable: 'Output 6MV',
+      includeAllInstances: true,
+      includeUnapproved: true
+    });
+    if (queryWithUnapproved.data.matchedPoints !== 4) {
+      throw new Error(`Expected 4 matched points when includeUnapproved is true, got ${queryWithUnapproved.data.matchedPoints}`);
+    }
+    const hasUnreviewedMonthly = queryWithUnapproved.data.dataPoints.some(p => p.y === 100.5);
+    if (!hasUnreviewedMonthly) {
+      throw new Error('Expected unreviewed monthly session point with y=100.5 to be included');
+    }
+    console.log('Verified: Unreviewed monthly physics tests properly included when includeUnapproved is true and excluded when false!');
+
     console.log('Verified: Multi-frequency and ad-hoc test lists captured and queryable correctly!');
 
     console.log('ALL API TESTS PASSED SUCCESSFULLY!');

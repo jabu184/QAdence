@@ -340,29 +340,6 @@ export default function App() {
     }
   }, [selectedTestList, tests, yVariable]);
 
-  const handleToggleIncludeUnapproved = useCallback(async (checked) => {
-    try {
-      const res = await fetch('/api/config', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          baseUrl: status?.qatrack?.baseUrl,
-          token: status?.qatrack?.hasToken ? undefined : '',
-          authType: status?.qatrack?.authType,
-          includeUnapproved: checked,
-          includeRejected: status?.qatrack?.includeRejected
-        })
-      });
-      if (res.ok) {
-        queryCacheRef.current.clear();
-        await loadMetadata();
-        runAllQueries();
-      }
-    } catch (err) {
-      console.error('Failed to update includeUnapproved setting:', err);
-    }
-  }, [status, loadMetadata, runAllQueries]);
-
   // In-memory query cache for instantaneous preset toggling and repeated local queries
   const queryCacheRef = useRef(new Map());
 
@@ -507,6 +484,29 @@ export default function App() {
       setIsLoading(false);
     }
   }, [datasets, xVariable, yVariable, selectedTestList, ignoredSessionIds, includeAllInstances]);
+
+  const handleToggleIncludeUnapproved = useCallback(async (checked) => {
+    try {
+      const res = await fetch('/api/config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          baseUrl: status?.qatrack?.baseUrl,
+          token: status?.qatrack?.hasToken ? undefined : '',
+          authType: status?.qatrack?.authType,
+          includeUnapproved: checked,
+          includeRejected: status?.qatrack?.includeRejected
+        })
+      });
+      if (res.ok) {
+        queryCacheRef.current.clear();
+        await loadMetadata();
+        runAllQueries();
+      }
+    } catch (err) {
+      console.error('Failed to update includeUnapproved setting:', err);
+    }
+  }, [status, loadMetadata, runAllQueries]);
 
   const loadedConfigRef = useRef(null);
 
