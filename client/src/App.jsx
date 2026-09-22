@@ -877,16 +877,18 @@ export default function App() {
       return;
     }
 
+    const wasLoaded = hasLoaded;
     setIsConfigStale(false);
     setHasLoaded(true);
 
     const queryRes = await runAllQueries(options);
 
-    // If local database has 0 records for this variable and needsPull is true, auto-retrieve from QATrack if configured
-    if (queryRes && queryRes.totalPoints === 0 && queryRes.needsPull && status?.qatrack?.configured) {
+    // Only auto-retrieve from QATrack on initial load if the local database has 0 records for this variable.
+    // If data was already loaded, changing filters or machines should never trigger an automatic network pull.
+    if (!wasLoaded && queryRes && queryRes.totalPoints === 0 && queryRes.needsPull && status?.qatrack?.configured) {
       await handleFetchFromQATrack(options);
     }
-  }, [yVariable, runAllQueries, status, handleFetchFromQATrack]);
+  }, [yVariable, hasLoaded, runAllQueries, status, handleFetchFromQATrack]);
 
   // Alias for backward compatibility
   const handleRetrieveOnDemand = handleRunLocalQuery;

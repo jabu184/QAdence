@@ -1337,7 +1337,13 @@ class QATrackClient {
           testListMap.set(String(l.id), l.name);
         }
         for (const c of dbUtcs) {
-          const colInfo = { unitName: c.unit_name, testListName: c.test_list_name, unitId: c.unit_id, testListId: c.test_list_id };
+          const colInfo = {
+            unitName: c.unit_name,
+            testListName: c.test_list_name,
+            unitId: c.unit_id,
+            testListId: c.test_list_id,
+            active: Boolean(c.active !== 0)
+          };
           utcMap.set(c.id, colInfo);
           utcMap.set(String(c.id), colInfo);
         }
@@ -1681,7 +1687,7 @@ class QATrackClient {
       for (const [colKey, colInfo] of utcMap.entries()) {
         const numColId = typeof colKey === 'number' ? colKey : (typeof colKey === 'string' && /^\d+$/.test(colKey) ? parseInt(colKey, 10) : null);
         if (!numColId || matchedUtcIds.has(numColId)) continue;
-        if (!colInfo.active) continue;
+        if (colInfo.active === false) continue;
 
         const uMatch = targetUnitsLower.length === 0 ||
           (colInfo.unitName && targetUnitsLower.includes(colInfo.unitName.toLowerCase().trim())) ||

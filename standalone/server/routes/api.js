@@ -418,11 +418,8 @@ router.post('/query', async (req, res) => {
         countQuery += ` AND s.test_list_name IN (${placeholders})`;
         countParams.push(...targetLists);
       }
-      if (units && units.length > 0) {
-        const placeholders = units.map(() => '?').join(',');
-        countQuery += ` AND s.unit_name IN (${placeholders})`;
-        countParams.push(...units);
-      }
+      // Note: Do not scope countQuery by units. If the local database already has data for this variable,
+      // filtering by a specific machine that happens to have 0 records should not trigger a needsPull auto-sync.
       const countRow = db.prepare(countQuery).get(...countParams);
       if (!countRow || countRow.count === 0) {
         needsPull = true;
