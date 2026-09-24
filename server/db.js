@@ -71,6 +71,10 @@ db.exec(`
     created_by TEXT,
     status TEXT,
     comments TEXT,
+    reviewed_by TEXT,
+    reviewed_at DATETIME,
+    modified_by TEXT,
+    modified_at DATETIME,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY(unit_id) REFERENCES units(id) ON DELETE SET NULL
   );
@@ -166,6 +170,20 @@ try {
   const tdCols = db.prepare("PRAGMA table_info(test_definitions)").all().map(c => c.name);
   if (!tdCols.includes('formatting')) {
     db.exec("ALTER TABLE test_definitions ADD COLUMN formatting TEXT");
+  }
+
+  const sessCols = db.prepare("PRAGMA table_info(sessions)").all().map(c => c.name);
+  if (!sessCols.includes('reviewed_by')) {
+    db.exec("ALTER TABLE sessions ADD COLUMN reviewed_by TEXT");
+  }
+  if (!sessCols.includes('reviewed_at')) {
+    db.exec("ALTER TABLE sessions ADD COLUMN reviewed_at DATETIME");
+  }
+  if (!sessCols.includes('modified_by')) {
+    db.exec("ALTER TABLE sessions ADD COLUMN modified_by TEXT");
+  }
+  if (!sessCols.includes('modified_at')) {
+    db.exec("ALTER TABLE sessions ADD COLUMN modified_at DATETIME");
   }
 } catch (e) {
   console.warn('Migration warning:', e.message);

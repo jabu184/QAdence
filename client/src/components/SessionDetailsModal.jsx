@@ -1,5 +1,5 @@
-import React, { useState, useEffect } from 'react';
-import { X, ExternalLink, Calendar, Cpu, ListChecks, User, MessageSquare, Search, AlertCircle, CheckCircle, ShieldAlert } from 'lucide-react';
+import React, { useState, useEffect, useMemo } from 'react';
+import { X, ExternalLink, Calendar, Cpu, ListChecks, User, UserCheck, Clock, MessageSquare, Search, AlertCircle, CheckCircle, ShieldAlert } from 'lucide-react';
 
 export default function SessionDetailsModal({
   sessionId,
@@ -47,8 +47,21 @@ export default function SessionDetailsModal({
   if (!sessionId) return null;
 
   const session = data?.session;
-  const testValues = data?.testValues || [];
+  const rawTestValues = data?.testValues || [];
   const qatrackWebUrl = data?.qatrackWebUrl;
+
+  const testValues = useMemo(() => {
+    const seen = new Set();
+    const unique = [];
+    for (const tv of rawTestValues) {
+      const key = (tv.test_name || '').toLowerCase().trim();
+      if (!seen.has(key)) {
+        seen.add(key);
+        unique.push(tv);
+      }
+    }
+    return unique;
+  }, [rawTestValues]);
 
   const filteredTests = testValues.filter(tv => {
     if (!searchQuery.trim()) return true;
@@ -267,6 +280,48 @@ export default function SessionDetailsModal({
                     {session.created_by || 'Unknown'}
                   </span>
                 </div>
+
+                <div>
+                  <span style={{ fontSize: '0.72rem', fontWeight: '700', color: '#64748b', textTransform: 'uppercase', display: 'flex', alignItems: 'center', gap: '4px' }}>
+                    <UserCheck size={12} color="#059669" /> Reviewed By
+                  </span>
+                  <span style={{ fontSize: '0.92rem', fontWeight: '600', color: '#0f172a' }}>
+                    {session.reviewed_by && session.reviewed_by !== '—'
+                      ? session.reviewed_by
+                      : (session.status?.toLowerCase().includes('approved') ? 'Approved' : 'Unreviewed')}
+                  </span>
+                  {session.reviewed_at ? (
+                    <span style={{ fontSize: '0.72rem', color: '#64748b', display: 'block' }}>
+                      {new Date(session.reviewed_at).toLocaleString()}
+                    </span>
+                  ) : (
+                    <span style={{ fontSize: '0.72rem', color: '#94a3b8', display: 'block' }}>
+                      {session.status?.toLowerCase().includes('approved') ? 'Reviewed' : 'Pending review'}
+                    </span>
+                  )}
+                </div>
+
+                <div>
+                  <span style={{ fontSize: '0.72rem', fontWeight: '700', color: '#64748b', textTransform: 'uppercase', display: 'flex', alignItems: 'center', gap: '4px' }}>
+                    <Clock size={12} color="#475569" /> Last Modified By
+                  </span>
+                  <span style={{ fontSize: '0.92rem', fontWeight: '600', color: '#0f172a' }}>
+                    {session.modified_by && session.modified_by !== '—'
+                      ? session.modified_by
+                      : (session.created_by || '—')}
+                  </span>
+                  {session.modified_at ? (
+                    <span style={{ fontSize: '0.72rem', color: '#64748b', display: 'block' }}>
+                      {new Date(session.modified_at).toLocaleString()}
+                    </span>
+                  ) : (
+                    session.work_completed ? (
+                      <span style={{ fontSize: '0.72rem', color: '#64748b', display: 'block' }}>
+                        {new Date(session.work_completed).toLocaleString()}
+                      </span>
+                    ) : null
+                  )}
+                </div>
               </div>
 
               {session.comments && session.comments.trim() && (
@@ -363,7 +418,7 @@ export default function SessionDetailsModal({
                               <td style={{ padding: '9px 12px', color: '#1e293b' }}>
                                 {tv.previous ? (
                                   <div
-                                    title={`Previous reading on ${new Date(tv.previous.date).toLocaleDateString()}: ${tv.previous.value_string}${tv.unit ? ' ' + tv.unit : ''} (${tv.previous.diffPercent !== null ? (tv.previous.diffPercent >= 0 ? '+' : '') + tv.previous.diffPercent.toFixed(2) + '% vs current' : 'comparison unavailable'})`}
+                                    title={`Previous reading on ${new Date(tv.previous.date).toLocaleDateString()}: ${tv.previous.value_string}${tv.unit ? ' ' + tv.unit : ''} (${tv.previous.diffPercent !== null ? (tv.previous.diffPercent >= 0 ? '+' : '') + Number(tv.previous.diffPercent).toFixed(1) + '% vs current' : 'comparison unavailable'})`}
                                     style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap' }}
                                   >
                                     <span style={{ fontFamily: 'monospace', fontWeight: '700' }}>
@@ -381,7 +436,7 @@ export default function SessionDetailsModal({
                                         background: tv.previous.diffPercent === 0 ? '#f1f5f9' : (tv.previous.diffPercent > 0 ? '#eff6ff' : '#f8fafc'),
                                         color: tv.previous.diffPercent === 0 ? '#64748b' : (tv.previous.diffPercent > 0 ? '#2563eb' : '#475569')
                                       }}>
-                                        <span>{tv.previous.diffPercent >= 0 ? '+' : ''}{tv.previous.diffPercent.toFixed(2)}%</span>
+                                        <span>{tv.previous.diffPercent >= 0 ? '+' : ''}{Number(tv.previous.diffPercent).toFixed(1)}%</span>
                                         <span style={{ fontSize: '0.82rem', lineHeight: 1 }}>{tv.previous.arrow}</span>
                                       </span>
                                     )}
@@ -391,7 +446,7 @@ export default function SessionDetailsModal({
                                 )}
                               </td>
 
-                              {/* Current Value (Marked in Red if Action, Orange if Tolerance) */}
+                              {/* Current Value (Marked in Red if Action, Orange if Tolerance, Blue if No Tolerance) */}
                               <td style={{ padding: '9px 12px' }}>
                                 {tv.toleranceLevel === 'action' ? (
                                   <div style={{
@@ -445,6 +500,32 @@ export default function SessionDetailsModal({
                                       Tolerance
                                     </span>
                                   </div>
+                                ) : tv.toleranceLevel === 'no_tolerance' ? (
+                                  <div style={{
+                                    display: 'inline-flex',
+                                    alignItems: 'center',
+                                    gap: '6px',
+                                    padding: '3px 8px',
+                                    borderRadius: '6px',
+                                    background: '#eff6ff',
+                                    border: '1.5px solid #93c5fd',
+                                    color: '#1d4ed8',
+                                    fontWeight: '700'
+                                  }}>
+                                    <span style={{ fontFamily: 'monospace', fontSize: '0.88rem' }}>{displayVal}</span>
+                                    <span style={{
+                                      fontSize: '0.65rem',
+                                      fontWeight: '700',
+                                      textTransform: 'uppercase',
+                                      background: '#3b82f6',
+                                      color: '#ffffff',
+                                      padding: '1px 5px',
+                                      borderRadius: '3px',
+                                      letterSpacing: '0.03em'
+                                    }}>
+                                      No Tolerance
+                                    </span>
+                                  </div>
                                 ) : (
                                   <span style={{ fontFamily: 'monospace', fontWeight: '700', color: '#0f172a', fontSize: '0.88rem' }}>
                                     {displayVal}
@@ -456,7 +537,7 @@ export default function SessionDetailsModal({
                               <td style={{ padding: '9px 12px', color: '#1e293b' }}>
                                 {tv.following ? (
                                   <div
-                                    title={`Following reading on ${new Date(tv.following.date).toLocaleDateString()}: ${tv.following.value_string}${tv.unit ? ' ' + tv.unit : ''} (${tv.following.diffPercent !== null ? (tv.following.diffPercent >= 0 ? '+' : '') + tv.following.diffPercent.toFixed(2) + '% vs current' : 'comparison unavailable'})`}
+                                    title={`Following reading on ${new Date(tv.following.date).toLocaleDateString()}: ${tv.following.value_string}${tv.unit ? ' ' + tv.unit : ''} (${tv.following.diffPercent !== null ? (tv.following.diffPercent >= 0 ? '+' : '') + Number(tv.following.diffPercent).toFixed(1) + '% vs current' : 'comparison unavailable'})`}
                                     style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap' }}
                                   >
                                     <span style={{ fontFamily: 'monospace', fontWeight: '700' }}>
@@ -474,7 +555,7 @@ export default function SessionDetailsModal({
                                         background: tv.following.diffPercent === 0 ? '#f1f5f9' : (tv.following.diffPercent > 0 ? '#eff6ff' : '#f8fafc'),
                                         color: tv.following.diffPercent === 0 ? '#64748b' : (tv.following.diffPercent > 0 ? '#2563eb' : '#475569')
                                       }}>
-                                        <span>{tv.following.diffPercent >= 0 ? '+' : ''}{tv.following.diffPercent.toFixed(2)}%</span>
+                                        <span>{tv.following.diffPercent >= 0 ? '+' : ''}{Number(tv.following.diffPercent).toFixed(1)}%</span>
                                         <span style={{ fontSize: '0.82rem', lineHeight: 1 }}>{tv.following.arrow}</span>
                                       </span>
                                     )}

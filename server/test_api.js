@@ -661,6 +661,44 @@ const server = app.listen(5099, async () => {
       throw new Error(`Expected following arrow '↓', got: ${outputTest.following.arrow}`);
     }
 
+    // Verify 1 d.p. precision on diffPercent
+    if (outputTest.previous.diffPercent !== null && typeof outputTest.previous.diffPercent === 'number') {
+      const dpParts = String(outputTest.previous.diffPercent).split('.');
+      if (dpParts.length > 1 && dpParts[1].length > 1) {
+        throw new Error(`Expected at most 1 decimal place on diffPercent, got ${outputTest.previous.diffPercent}`);
+      }
+    }
+
+    // Test No Tolerance level mapping (blue 'no_tolerance')
+    db.prepare(`UPDATE test_values SET pass_fail = 'no_tol' WHERE session_id = ? AND test_name = 'Output 6MV'`).run(sWeekly);
+    const noTolRes = await axios.get(`${base}/session-details/${sWeekly}`);
+    const noTolTest = noTolRes.data.testValues.find(tv => tv.test_name === 'Output 6MV');
+    if (noTolTest.toleranceLevel !== 'no_tolerance') {
+      throw new Error(`Expected toleranceLevel 'no_tolerance' for pass_fail='no_tol', got: ${noTolTest.toleranceLevel}`);
+    }
+
+    // Verify deduplication: insert duplicate test_definitions across multiple test lists
+    db.prepare(`INSERT OR REPLACE INTO test_definitions (name, slug, test_list_name, unit, data_type, is_numeric) VALUES ('Output 6MV', 'output_6mv', 'List A', '%', 'simple', 1)`).run();
+    db.prepare(`INSERT OR REPLACE INTO test_definitions (name, slug, test_list_name, unit, data_type, is_numeric) VALUES ('Output 6MV', 'output_6mv', 'List B', '%', 'simple', 1)`).run();
+    db.prepare(`INSERT OR REPLACE INTO test_definitions (name, slug, test_list_name, unit, data_type, is_numeric) VALUES ('Output 6MV', 'output_6mv', 'List C', '%', 'simple', 1)`).run();
+    const dedupRes = await axios.get(`${base}/session-details/${sWeekly}`);
+    const occurrences = dedupRes.data.testValues.filter(tv => tv.test_name === 'Output 6MV');
+    if (occurrences.length !== 1) {
+      throw new Error(`Expected exactly 1 row for 'Output 6MV', but got ${occurrences.length} rows`);
+    }
+
+    // Test reviewed_by, reviewed_at, modified_by, modified_at
+    db.prepare(`
+      UPDATE sessions 
+      SET reviewed_by = 'Dr. Jane Physicist', reviewed_at = '2026-01-03 14:00:00',
+          modified_by = 'Technologist Bob', modified_at = '2026-01-03 12:30:00'
+      WHERE id = ?
+    `).run(sWeekly);
+    const auditRes = await axios.get(`${base}/session-details/${sWeekly}`);
+    if (auditRes.data.session.reviewed_by !== 'Dr. Jane Physicist' || auditRes.data.session.modified_by !== 'Technologist Bob') {
+      throw new Error(`Expected reviewed_by and modified_by in session details, got: ${JSON.stringify(auditRes.data.session)}`);
+    }
+
     const detailsRes = await axios.get(`${base}/session-details/${sMonthly}`);
     if (!detailsRes.data.success || !detailsRes.data.session) {
       throw new Error(`Expected success and session in session-details, got ${JSON.stringify(detailsRes.data)}`);
@@ -671,7 +709,7 @@ const server = app.listen(5099, async () => {
     if (!detailsRes.data.qatrackWebUrl || !detailsRes.data.qatrackWebUrl.includes('/qa/session/details/101/')) {
       throw new Error(`Expected qatrackWebUrl with /qa/session/details/101/, got ${detailsRes.data.qatrackWebUrl}`);
     }
-    console.log('Verified: /api/session-details/:id returns complete metadata, previous/following comparisons, tolerance levels, and QATrack direct link!');
+    console.log('Verified: /api/session-details/:id returns complete metadata, reviewer/modifier timestamps, 1 row per test, no_tolerance blue level, and 1 d.p. comparisons!');
 
     // 6. Test conditional filters combined with AND or OR
     console.log('Testing conditional filters with AND or OR combination...');

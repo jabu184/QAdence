@@ -1371,8 +1371,13 @@ class QATrackClient {
     return { numVal, strVal };
   }
 
-  resolveUserName(userRef, inst = null) {
-    if (!userRef && !inst) return 'Unknown';
+  resolveUserName(userRef, inst = null, fallbackName = null) {
+    if (!userRef && !inst && !fallbackName) return '—';
+
+    // 0. Explicit fallback name
+    if (fallbackName && typeof fallbackName === 'string' && fallbackName.trim() && !fallbackName.startsWith('http')) {
+      return fallbackName.trim();
+    }
 
     // 1. Direct name on instance
     if (inst && typeof inst.created_by_name === 'string' && inst.created_by_name.trim()) {
@@ -1414,7 +1419,7 @@ class QATrackClient {
       if (id) return `User #${id}`;
     }
 
-    return (inst && inst.created_by_name) || (typeof userRef === 'string' && !userRef.includes('/') ? userRef : 'User');
+    return (inst && inst.created_by_name) || (typeof userRef === 'string' && !userRef.includes('/') ? userRef : '—');
   }
 
   resolveCommentsSync(inst) {
@@ -1624,15 +1629,19 @@ class QATrackClient {
 
       // Ingestion helpers
       const insertSession = db.prepare(`
-        INSERT INTO sessions (qatrack_instance_id, unit_id, unit_name, test_list_name, work_completed, created_by, status, comments)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO sessions (qatrack_instance_id, unit_id, unit_name, test_list_name, work_completed, created_by, status, comments, reviewed_by, reviewed_at, modified_by, modified_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(qatrack_instance_id) DO UPDATE SET
           unit_name = excluded.unit_name,
           test_list_name = excluded.test_list_name,
           work_completed = excluded.work_completed,
           created_by = excluded.created_by,
           status = excluded.status,
-          comments = excluded.comments
+          comments = excluded.comments,
+          reviewed_by = excluded.reviewed_by,
+          reviewed_at = excluded.reviewed_at,
+          modified_by = excluded.modified_by,
+          modified_at = excluded.modified_at
       `);
       const getSessionByQATrackId = db.prepare('SELECT id FROM sessions WHERE qatrack_instance_id = ?');
       const deleteOldValues = db.prepare('DELETE FROM test_values WHERE session_id = ?');
@@ -1812,6 +1821,34 @@ class QATrackClient {
           const createdBy = this.resolveUserName(inst.created_by, inst);
           const cleanComments = this.resolveCommentsSync(inst);
 
+          let reviewedBy = this.resolveUserName(inst.reviewed_by || inst.reviewed_by_name, inst, inst.reviewed_by_name);
+          let reviewedAt = (inst.reviewed || inst.reviewed_at || inst.reviewed_date)
+            ? String(inst.reviewed || inst.reviewed_at || inst.reviewed_date).replace('T', ' ').substring(0, 19)
+            : null;
+          let modifiedBy = this.resolveUserName(inst.modified_by || inst.modified_by_name, inst, inst.modified_by_name);
+          let modifiedAt = (inst.modified || inst.modified_at || inst.updated || inst.updated_at)
+            ? String(inst.modified || inst.modified_at || inst.updated || inst.updated_at).replace('T', ' ').substring(0, 19)
+            : null;
+
+          if ((!reviewedBy || reviewedBy === '—') && rawTestInstances.length > 0) {
+            for (const ti of rawTestInstances) {
+              if (ti.reviewed_by) {
+                reviewedBy = this.resolveUserName(ti.reviewed_by, null, ti.reviewed_by_name);
+                reviewedAt = (ti.reviewed || ti.reviewed_at) ? String(ti.reviewed || ti.reviewed_at).replace('T', ' ').substring(0, 19) : reviewedAt;
+                break;
+              }
+            }
+          }
+          if ((!modifiedBy || modifiedBy === '—') && rawTestInstances.length > 0) {
+            for (const ti of rawTestInstances) {
+              if (ti.modified_by) {
+                modifiedBy = this.resolveUserName(ti.modified_by, null, ti.modified_by_name);
+                modifiedAt = (ti.modified || ti.modified_at) ? String(ti.modified || ti.modified_at).replace('T', ' ').substring(0, 19) : modifiedAt;
+                break;
+              }
+            }
+          }
+
           insertSession.run(
             qatrackId,
             null,
@@ -1820,7 +1857,11 @@ class QATrackClient {
             dateStr,
             createdBy,
             sessionStatus,
-            cleanComments
+            cleanComments,
+            reviewedBy,
+            reviewedAt,
+            modifiedBy,
+            modifiedAt
           );
 
           const sess = getSessionByQATrackId.get(qatrackId);
@@ -1839,7 +1880,7 @@ class QATrackClient {
               const { numVal, strVal } = this.extractTestInstanceValue(ti, tiInfo.formatting);
 
               const reviewStatus = tiStatusInfo.isRejected ? 'Rejected' : (tiStatusInfo.requiresReview ? 'Unreviewed' : 'Approved');
-              const passFail = (ti.pass_fail || (tiStatusInfo.isRejected ? 'action' : 'ok')).toLowerCase();
+              const passFail = (ti.pass_fail || (ti.tolerance ? 'ok' : 'no_tol')).toLowerCase();
 
               insertTestVal.run(
                 sess.id,
@@ -2228,15 +2269,19 @@ class QATrackClient {
 
       // 7. Test List Instances (Sessions) - Streaming page-by-page database insert
       const insertSession = db.prepare(`
-        INSERT INTO sessions (qatrack_instance_id, unit_id, unit_name, test_list_name, work_completed, created_by, status, comments)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO sessions (qatrack_instance_id, unit_id, unit_name, test_list_name, work_completed, created_by, status, comments, reviewed_by, reviewed_at, modified_by, modified_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(qatrack_instance_id) DO UPDATE SET
           unit_name = excluded.unit_name,
           test_list_name = excluded.test_list_name,
           work_completed = excluded.work_completed,
           created_by = excluded.created_by,
           status = excluded.status,
-          comments = excluded.comments
+          comments = excluded.comments,
+          reviewed_by = excluded.reviewed_by,
+          reviewed_at = excluded.reviewed_at,
+          modified_by = excluded.modified_by,
+          modified_at = excluded.modified_at
       `);
 
       const getSessionByQATrackId = db.prepare('SELECT id FROM sessions WHERE qatrack_instance_id = ?');
@@ -2356,6 +2401,34 @@ class QATrackClient {
           const createdBy = this.resolveUserName(inst.created_by, inst);
           const cleanComments = this.resolveCommentsSync(inst);
 
+          let reviewedBy = this.resolveUserName(inst.reviewed_by || inst.reviewed_by_name, inst, inst.reviewed_by_name);
+          let reviewedAt = (inst.reviewed || inst.reviewed_at || inst.reviewed_date)
+            ? String(inst.reviewed || inst.reviewed_at || inst.reviewed_date).replace('T', ' ').substring(0, 19)
+            : null;
+          let modifiedBy = this.resolveUserName(inst.modified_by || inst.modified_by_name, inst, inst.modified_by_name);
+          let modifiedAt = (inst.modified || inst.modified_at || inst.updated || inst.updated_at)
+            ? String(inst.modified || inst.modified_at || inst.updated || inst.updated_at).replace('T', ' ').substring(0, 19)
+            : null;
+
+          if ((!reviewedBy || reviewedBy === '—') && rawTestInstances.length > 0) {
+            for (const ti of rawTestInstances) {
+              if (ti.reviewed_by) {
+                reviewedBy = this.resolveUserName(ti.reviewed_by, null, ti.reviewed_by_name);
+                reviewedAt = (ti.reviewed || ti.reviewed_at) ? String(ti.reviewed || ti.reviewed_at).replace('T', ' ').substring(0, 19) : reviewedAt;
+                break;
+              }
+            }
+          }
+          if ((!modifiedBy || modifiedBy === '—') && rawTestInstances.length > 0) {
+            for (const ti of rawTestInstances) {
+              if (ti.modified_by) {
+                modifiedBy = this.resolveUserName(ti.modified_by, null, ti.modified_by_name);
+                modifiedAt = (ti.modified || ti.modified_at) ? String(ti.modified || ti.modified_at).replace('T', ' ').substring(0, 19) : modifiedAt;
+                break;
+              }
+            }
+          }
+
           insertSession.run(
             qatrackId,
             null,
@@ -2364,7 +2437,11 @@ class QATrackClient {
             dateStr,
             createdBy,
             sessionStatus,
-            cleanComments
+            cleanComments,
+            reviewedBy,
+            reviewedAt,
+            modifiedBy,
+            modifiedAt
           );
 
           const sess = getSessionByQATrackId.get(qatrackId);
@@ -2383,7 +2460,7 @@ class QATrackClient {
               const { numVal, strVal } = this.extractTestInstanceValue(ti, tiInfo.formatting);
 
               const reviewStatus = tiStatusInfo.isRejected ? 'Rejected' : (tiStatusInfo.requiresReview ? 'Unreviewed' : 'Approved');
-              const passFail = (ti.pass_fail || (tiStatusInfo.isRejected ? 'action' : 'ok')).toLowerCase();
+              const passFail = (ti.pass_fail || (ti.tolerance ? 'ok' : 'no_tol')).toLowerCase();
 
               insertTestVal.run(
                 sess.id,
@@ -2466,6 +2543,62 @@ class QATrackClient {
       this.syncStatus.isRunning = false;
       this.updateMemoryStats();
     }
+  }
+
+  async fetchSingleSessionDetails(instanceId) {
+    if (!instanceId || !this.baseUrl || !this.token) return null;
+    try {
+      const endpoints = await this.discoverEndpoints();
+      const baseInstUrl = (endpoints.testListInstancesUrl || `${this.baseUrl}/api/qc/testlistinstances/`).replace(/\/$/, '');
+      const url = `${baseInstUrl}/${instanceId}/`;
+      const res = await this.client.get(url);
+      if (res.data) {
+        const inst = res.data;
+        let reviewedBy = this.resolveUserName(inst.reviewed_by || inst.reviewed_by_name, inst, inst.reviewed_by_name);
+        let reviewedAt = (inst.reviewed || inst.reviewed_at || inst.reviewed_date)
+          ? String(inst.reviewed || inst.reviewed_at || inst.reviewed_date).replace('T', ' ').substring(0, 19)
+          : null;
+
+        let modifiedBy = this.resolveUserName(inst.modified_by || inst.modified_by_name, inst, inst.modified_by_name);
+        let modifiedAt = (inst.modified || inst.modified_at || inst.updated || inst.updated_at)
+          ? String(inst.modified || inst.modified_at || inst.updated || inst.updated_at).replace('T', ' ').substring(0, 19)
+          : null;
+
+        const rawTis = Array.isArray(inst.test_instances) ? inst.test_instances : [];
+        if ((!reviewedBy || reviewedBy === '—') && rawTis.length > 0) {
+          for (const ti of rawTis) {
+            if (ti.reviewed_by) {
+              reviewedBy = this.resolveUserName(ti.reviewed_by, null, ti.reviewed_by_name);
+              reviewedAt = (ti.reviewed || ti.reviewed_at) ? String(ti.reviewed || ti.reviewed_at).replace('T', ' ').substring(0, 19) : reviewedAt;
+              break;
+            }
+          }
+        }
+        if ((!modifiedBy || modifiedBy === '—') && rawTis.length > 0) {
+          for (const ti of rawTis) {
+            if (ti.modified_by) {
+              modifiedBy = this.resolveUserName(ti.modified_by, null, ti.modified_by_name);
+              modifiedAt = (ti.modified || ti.modified_at) ? String(ti.modified || ti.modified_at).replace('T', ' ').substring(0, 19) : modifiedAt;
+              break;
+            }
+          }
+        }
+
+        try {
+          db.prepare(`
+            UPDATE sessions 
+            SET reviewed_by = COALESCE(?, reviewed_by),
+                reviewed_at = COALESCE(?, reviewed_at),
+                modified_by = COALESCE(?, modified_by),
+                modified_at = COALESCE(?, modified_at)
+            WHERE qatrack_instance_id = ?
+          `).run(reviewedBy, reviewedAt, modifiedBy, modifiedAt, instanceId);
+        } catch (_) {}
+
+        return { reviewed_by: reviewedBy, reviewed_at: reviewedAt, modified_by: modifiedBy, modified_at: modifiedAt };
+      }
+    } catch (_) {}
+    return null;
   }
 }
 

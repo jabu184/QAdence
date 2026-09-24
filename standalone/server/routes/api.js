@@ -903,7 +903,7 @@ function calculateDiffAndArrow(targetVal, currentVal) {
 
   let diffPercent = null;
   if (Math.abs(currentVal) > 0.000001) {
-    diffPercent = (delta / Math.abs(currentVal)) * 100;
+    diffPercent = Math.round(((delta / Math.abs(currentVal)) * 100) * 10) / 10;
   } else if (Math.abs(targetVal) < 0.000001) {
     diffPercent = 0;
   }
@@ -942,10 +942,10 @@ function sanitizeComments(raw) {
 }
 
 // 8b. Session Details & Associated Test List Values (for Pop-up Splash)
-router.get(['/session-details/:id', '/sessions/:id/details'], (req, res) => {
+router.get(['/session-details/:id', '/sessions/:id/details'], async (req, res) => {
   try {
     const sessionId = req.params.id;
-    const session = db.prepare(`
+    let session = db.prepare(`
       SELECT s.*, u.unit_class, u.unit_type, u.serial_number, u.location
       FROM sessions s
       LEFT JOIN units u ON s.unit_name = u.name
@@ -956,6 +956,15 @@ router.get(['/session-details/:id', '/sessions/:id/details'], (req, res) => {
       return res.status(404).json({ success: false, error: 'Session not found' });
     }
 
+    if (session.qatrack_instance_id && (!session.reviewed_by && !session.modified_by)) {
+      try {
+        const liveInfo = await qatrackClient.fetchSingleSessionDetails(session.qatrack_instance_id);
+        if (liveInfo) {
+          session = { ...session, ...liveInfo };
+        }
+      } catch (_) {}
+    }
+
     // Clean comments if legacy raw URL array was stored
     session.comments = sanitizeComments(session.comments);
 
@@ -964,16 +973,28 @@ router.get(['/session-details/:id', '/sessions/:id/details'], (req, res) => {
              tv.unit, tv.tolerance_min, tv.tolerance_max, tv.status, tv.pass_fail,
              td.formatting
       FROM test_values tv
-      LEFT JOIN test_definitions td ON tv.test_name = td.name
+      LEFT JOIN (SELECT name, MAX(formatting) as formatting FROM test_definitions GROUP BY name) td ON tv.test_name = td.name
       WHERE tv.session_id = ?
+      GROUP BY tv.id
       ORDER BY tv.test_name ASC
     `).all(session.id);
+
+    // Guarantee strictly 1 row per unique test name
+    const seenTests = new Set();
+    const uniqueTestValues = [];
+    for (const tv of testValuesRaw) {
+      const key = (tv.test_name || '').toLowerCase().trim();
+      if (!seenTests.has(key)) {
+        seenTests.add(key);
+        uniqueTestValues.push(tv);
+      }
+    }
 
     const getPrevStmt = db.prepare(`
       SELECT tv.value_string, tv.value_numeric, tv.unit, tv.status, tv.pass_fail, s.work_completed, s.id as session_id, td.formatting
       FROM test_values tv
       JOIN sessions s ON tv.session_id = s.id
-      LEFT JOIN test_definitions td ON tv.test_name = td.name
+      LEFT JOIN (SELECT name, MAX(formatting) as formatting FROM test_definitions GROUP BY name) td ON tv.test_name = td.name
       WHERE s.unit_name = ? AND tv.test_name = ?
         AND (s.work_completed < ? OR (s.work_completed = ? AND s.id < ?))
       ORDER BY s.work_completed DESC, s.id DESC
@@ -984,14 +1005,14 @@ router.get(['/session-details/:id', '/sessions/:id/details'], (req, res) => {
       SELECT tv.value_string, tv.value_numeric, tv.unit, tv.status, tv.pass_fail, s.work_completed, s.id as session_id, td.formatting
       FROM test_values tv
       JOIN sessions s ON tv.session_id = s.id
-      LEFT JOIN test_definitions td ON tv.test_name = td.name
+      LEFT JOIN (SELECT name, MAX(formatting) as formatting FROM test_definitions GROUP BY name) td ON tv.test_name = td.name
       WHERE s.unit_name = ? AND tv.test_name = ?
         AND (s.work_completed > ? OR (s.work_completed = ? AND s.id > ?))
       ORDER BY s.work_completed ASC, s.id ASC
       LIMIT 1
     `);
 
-    const enrichedTestValues = testValuesRaw.map(tv => {
+    const enrichedTestValues = uniqueTestValues.map(tv => {
       // 1. Ensure value_string preserves exact formatting/precision from QATrack
       let currentDisplay = tv.value_string;
       if ((currentDisplay === null || currentDisplay === undefined || currentDisplay === '' || currentDisplay === String(tv.value_numeric)) &&
@@ -1001,19 +1022,28 @@ router.get(['/session-details/:id', '/sessions/:id/details'], (req, res) => {
         currentDisplay = tv.value_numeric !== null ? String(tv.value_numeric) : '';
       }
 
-      // 2. Tolerance & Action level marking
-      const pFail = (tv.pass_fail || '').toLowerCase();
-      const st = (tv.status || '').toLowerCase();
+      // 2. Tolerance & Action level marking:
+      // - 'no_tolerance' (blue) when test has no tolerance defined in QATrack
+      // - 'tolerance' (amber) strictly when value is outside tolerance level but within action level
+      // - 'action' (red) when outside action level
+      // - 'ok' when passing within tolerance
+      const pFail = (tv.pass_fail || '').toLowerCase().trim();
+      const st = (tv.status || '').toLowerCase().trim();
       let toleranceLevel = 'ok';
-      if (pFail.includes('action') || st.includes('action') || pFail.includes('fail') || st.includes('fail')) {
+
+      if (pFail === 'no_tol' || pFail === 'no_tolerance' || pFail === 'not_set' || pFail.includes('no_tol') || pFail === 'none') {
+        toleranceLevel = 'no_tolerance';
+      } else if (pFail.includes('action') || st.includes('action') || pFail === 'fail' || st === 'fail') {
         toleranceLevel = 'action';
-      } else if (pFail.includes('tolerance') || pFail.includes('tol') || st.includes('tolerance') || st.includes('tol') || st.includes('warn')) {
+      } else if ((pFail.includes('tolerance') && !pFail.includes('no_tol')) || pFail === 'tol' || st === 'tolerance' || st === 'tol' || st.includes('warn')) {
         toleranceLevel = 'tolerance';
+      } else if (!pFail && tv.tolerance_min === null && tv.tolerance_max === null) {
+        toleranceLevel = 'no_tolerance';
       }
 
       // 3. Review status (Approved, Unreviewed, etc.)
       let reviewStatus = tv.status || 'Approved';
-      if (['ok', 'action', 'tolerance', 'tol', 'pass'].includes(reviewStatus.toLowerCase())) {
+      if (['ok', 'action', 'tolerance', 'tol', 'pass', 'no_tol', 'no_tolerance'].includes(reviewStatus.toLowerCase())) {
         reviewStatus = session.status || 'Approved';
       }
 
