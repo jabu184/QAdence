@@ -538,7 +538,7 @@ router.post('/query', async (req, res) => {
       xVariable,   // e.g. 'Planned Dose' or 'work_completed'
       yVariable,   // e.g. 'Measured Dose' or 'Gamma Pass Rate (3%/3mm)'
       groupBy,     // e.g. 'unit_name' or 'Site' or 'Beam Energy'
-      metadataTests = ['Patient ID', 'Plan ID', 'Plan Name', 'Site', 'Beam Energy', 'Delivery Technique'],
+      metadataTests = ['Patient ID', 'Plan ID', 'Patient QA Plan', 'patient_qa_plan_id', 'Plan Name', 'Site', 'Beam Energy', 'Delivery Technique'],
       pullOnDemand = false
     } = req.body;
 
@@ -738,7 +738,7 @@ router.post('/query', async (req, res) => {
 
     // Fetch all test values for these matching sessions
     let valuesQuery = `
-      SELECT session_id, test_name, value_string, value_numeric, unit, tolerance_min, tolerance_max
+      SELECT session_id, test_name, test_slug, value_string, value_numeric, unit, tolerance_min, tolerance_max
       FROM test_values
       WHERE session_id IN (${idPlaceholders})
     `;
@@ -750,13 +750,16 @@ router.post('/query', async (req, res) => {
     }
     const testValues = db.prepare(valuesQuery).all(...sessionIds);
 
-    // Group test values by session_id
+    // Group test values by session_id (keyed by both display name and macro slug)
     const valuesBySession = new Map();
     for (const v of testValues) {
       if (!valuesBySession.has(v.session_id)) {
         valuesBySession.set(v.session_id, {});
       }
       valuesBySession.get(v.session_id)[v.test_name] = v;
+      if (v.test_slug) {
+        valuesBySession.get(v.session_id)[v.test_slug] = v;
+      }
     }
 
     // Build data points and table rows
@@ -809,11 +812,31 @@ router.post('/query', async (req, res) => {
           meta[mt] = sessVals[mt].value_string || sessVals[mt].value_numeric;
         }
       }
-      // Ensure Plan ID is resolved from test values (checking variants, or fallback to Plan Name)
+      // Ensure Plan ID is resolved from test values (checking Patient QA Plan, macro patient_qa_plan_id, variants, or fallback to Plan Name)
       if (!meta['Plan ID']) {
-        const planCandidate = sessVals['Plan ID'] || sessVals['Plan Id'] || sessVals['plan_id'] || sessVals['Plan'] || sessVals['Plan Number'] || sessVals['Plan Name'];
+        const planCandidate = sessVals['Patient QA Plan']
+          || sessVals['patient_qa_plan_id']
+          || sessVals['Patient QA Plan ID']
+          || sessVals['Plan ID']
+          || sessVals['Plan Id']
+          || sessVals['plan_id']
+          || sessVals['Plan']
+          || sessVals['Plan Number']
+          || sessVals['Plan Name'];
         if (planCandidate) {
-          meta['Plan ID'] = planCandidate.value_string || planCandidate.value_numeric;
+          meta['Plan ID'] = planCandidate.value_string || (planCandidate.value_numeric !== null ? String(planCandidate.value_numeric) : '');
+        }
+      }
+      if (!meta['Plan ID']) {
+        for (const [k, v] of Object.entries(sessVals)) {
+          const lk = k.toLowerCase().replace(/[\s-_]/g, '');
+          if (lk === 'patientqaplan' || lk === 'patientqaplanid' || lk === 'planid' || lk === 'planname') {
+            const val = v.value_string || (v.value_numeric !== null ? String(v.value_numeric) : '');
+            if (val) {
+              meta['Plan ID'] = val;
+              break;
+            }
+          }
         }
       }
 

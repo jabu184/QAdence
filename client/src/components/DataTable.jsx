@@ -30,6 +30,8 @@ export default function DataTable({
         (r['Patient ID'] && String(r['Patient ID']).toLowerCase().includes(q)) ||
         (r['Patient QA Patient ID'] && String(r['Patient QA Patient ID']).toLowerCase().includes(q)) ||
         (r['Plan ID'] && String(r['Plan ID']).toLowerCase().includes(q)) ||
+        (r['Patient QA Plan'] && String(r['Patient QA Plan']).toLowerCase().includes(q)) ||
+        (r['patient_qa_plan_id'] && String(r['patient_qa_plan_id']).toLowerCase().includes(q)) ||
         (r['Plan Name'] && String(r['Plan Name']).toLowerCase().includes(q)) ||
         (r.unit && r.unit.toLowerCase().includes(q)) ||
         (r['Site'] && String(r['Site']).toLowerCase().includes(q)) ||
@@ -38,8 +40,8 @@ export default function DataTable({
     }
 
     result.sort((a, b) => {
-      let va = sortField === 'Plan ID' ? (a['Plan ID'] || a['Plan Name']) : a[sortField];
-      let vb = sortField === 'Plan ID' ? (b['Plan ID'] || b['Plan Name']) : b[sortField];
+      let va = sortField === 'Plan ID' ? (a['Plan ID'] || a['Patient QA Plan'] || a['patient_qa_plan_id'] || a['Plan Name']) : a[sortField];
+      let vb = sortField === 'Plan ID' ? (b['Plan ID'] || b['Patient QA Plan'] || b['patient_qa_plan_id'] || b['Plan Name']) : b[sortField];
       if (va === undefined || va === null) return 1;
       if (vb === undefined || vb === null) return -1;
       if (typeof va === 'number' && typeof vb === 'number') {
@@ -75,7 +77,7 @@ export default function DataTable({
     const csvLines = [headers.join(',')];
     for (const r of rowsToExport) {
       const patId = r['Patient ID'] || r['Patient QA Patient ID'] || '';
-      const planIdVal = r['Plan ID'] || r['Plan Name'] || '';
+      const planIdVal = r['Plan ID'] || r['Patient QA Plan'] || r['patient_qa_plan_id'] || r['Plan Name'] || '';
       const site = r['Site'] || r['Patient QA Site'] || '';
       const energy = r['Beam Energy'] || r['Energy'] || '';
       const line = [
@@ -207,7 +209,7 @@ export default function DataTable({
             {filteredRows.map((r, i) => {
               const isIgnored = ignoredSet.has(r.sessionId);
               const patId = r['Patient ID'] || r['Patient QA Patient ID'] || '-';
-              const planId = r['Plan ID'] || r['Plan Name'] || '-';
+              const planId = r['Plan ID'] || r['Patient QA Plan'] || r['patient_qa_plan_id'] || r['Plan Name'] || '-';
               const site = r['Site'] || r['Patient QA Site'] || '-';
               const energy = r['Beam Energy'] || r['Energy'] || '-';
 

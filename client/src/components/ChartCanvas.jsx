@@ -22,6 +22,166 @@ import {
   generateForecastPoints
 } from '../utils/math';
 
+// Chart.js Canvas plugin for horizontal shaded tolerance band (Scatter/Line)
+const horizontalToleranceBandPlugin = {
+  id: 'horizontalToleranceBand',
+  beforeDatasetsDraw: (chart, args, pluginOptions) => {
+    if (!pluginOptions || !pluginOptions.enabled) return;
+    const { topVal, bottomVal, baselineVal } = pluginOptions;
+    if (topVal === null && bottomVal === null && (baselineVal === null || baselineVal === undefined)) return;
+
+    const { ctx, chartArea, scales } = chart;
+    const yScale = scales?.y;
+    if (!ctx || !chartArea || !yScale) return;
+
+    const width = chartArea.width || (chartArea.right - chartArea.left);
+
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(chartArea.left, chartArea.top, width, chartArea.height || (chartArea.bottom - chartArea.top));
+    ctx.clip();
+
+    // 1. Shaded acceptable green zone (precisely up to tolerance lines)
+    if (topVal !== null || bottomVal !== null) {
+      const effTop = topVal !== null ? topVal : baselineVal;
+      const effBottom = bottomVal !== null ? bottomVal : baselineVal;
+      const topPixel = yScale.getPixelForValue(effTop);
+      const bottomPixel = yScale.getPixelForValue(effBottom);
+
+      if (!isNaN(topPixel) && !isNaN(bottomPixel)) {
+        const y = Math.min(topPixel, bottomPixel);
+        const height = Math.abs(bottomPixel - topPixel);
+        ctx.fillStyle = 'rgba(34, 197, 94, 0.18)'; // Vivid green shaded area matching box & whisker
+        ctx.fillRect(chartArea.left, y, width, height);
+      }
+    }
+
+    // 2. Full-width Upper Tolerance Line
+    if (topVal !== null && topVal !== undefined) {
+      const topPixel = yScale.getPixelForValue(topVal);
+      if (!isNaN(topPixel)) {
+        ctx.strokeStyle = '#f59e0b';
+        ctx.lineWidth = 1.5;
+        ctx.setLineDash([5, 4]);
+        ctx.beginPath();
+        ctx.moveTo(chartArea.left, topPixel);
+        ctx.lineTo(chartArea.right, topPixel);
+        ctx.stroke();
+      }
+    }
+
+    // 3. Full-width Lower Tolerance Line
+    if (bottomVal !== null && bottomVal !== undefined) {
+      const bottomPixel = yScale.getPixelForValue(bottomVal);
+      if (!isNaN(bottomPixel)) {
+        ctx.strokeStyle = '#f59e0b';
+        ctx.lineWidth = 1.5;
+        ctx.setLineDash([5, 4]);
+        ctx.beginPath();
+        ctx.moveTo(chartArea.left, bottomPixel);
+        ctx.lineTo(chartArea.right, bottomPixel);
+        ctx.stroke();
+      }
+    }
+
+    // 4. Full-width Baseline Line
+    if (baselineVal !== null && baselineVal !== undefined) {
+      const basePixel = yScale.getPixelForValue(baselineVal);
+      if (!isNaN(basePixel)) {
+        ctx.strokeStyle = '#10b981';
+        ctx.lineWidth = 2;
+        ctx.setLineDash([6, 4]);
+        ctx.beginPath();
+        ctx.moveTo(chartArea.left, basePixel);
+        ctx.lineTo(chartArea.right, basePixel);
+        ctx.stroke();
+      }
+    }
+
+    ctx.restore();
+  }
+};
+
+// Chart.js Canvas plugin for vertical shaded tolerance band (Normal Distribution)
+const verticalToleranceBandPlugin = {
+  id: 'verticalToleranceBand',
+  beforeDatasetsDraw: (chart, args, pluginOptions) => {
+    if (!pluginOptions || !pluginOptions.enabled) return;
+    const { leftVal, rightVal, baselineVal } = pluginOptions;
+    if (leftVal === null && rightVal === null && (baselineVal === null || baselineVal === undefined)) return;
+
+    const { ctx, chartArea, scales } = chart;
+    const xScale = scales?.x;
+    if (!ctx || !chartArea || !xScale) return;
+
+    const height = chartArea.height || (chartArea.bottom - chartArea.top);
+
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(chartArea.left, chartArea.top, chartArea.width || (chartArea.right - chartArea.left), height);
+    ctx.clip();
+
+    // 1. Shaded acceptable green zone
+    if (leftVal !== null || rightVal !== null) {
+      const effLeft = leftVal !== null ? leftVal : baselineVal;
+      const effRight = rightVal !== null ? rightVal : baselineVal;
+      const leftPixel = xScale.getPixelForValue(effLeft);
+      const rightPixel = xScale.getPixelForValue(effRight);
+
+      if (!isNaN(leftPixel) && !isNaN(rightPixel)) {
+        const x = Math.min(leftPixel, rightPixel);
+        const width = Math.abs(rightPixel - leftPixel);
+        ctx.fillStyle = 'rgba(34, 197, 94, 0.18)';
+        ctx.fillRect(x, chartArea.top, width, height);
+      }
+    }
+
+    // 2. Vertical Lower Tolerance Line
+    if (leftVal !== null && leftVal !== undefined) {
+      const leftPixel = xScale.getPixelForValue(leftVal);
+      if (!isNaN(leftPixel)) {
+        ctx.strokeStyle = '#f59e0b';
+        ctx.lineWidth = 1.5;
+        ctx.setLineDash([5, 4]);
+        ctx.beginPath();
+        ctx.moveTo(leftPixel, chartArea.top);
+        ctx.lineTo(leftPixel, chartArea.bottom);
+        ctx.stroke();
+      }
+    }
+
+    // 3. Vertical Upper Tolerance Line
+    if (rightVal !== null && rightVal !== undefined) {
+      const rightPixel = xScale.getPixelForValue(rightVal);
+      if (!isNaN(rightPixel)) {
+        ctx.strokeStyle = '#f59e0b';
+        ctx.lineWidth = 1.5;
+        ctx.setLineDash([5, 4]);
+        ctx.beginPath();
+        ctx.moveTo(rightPixel, chartArea.top);
+        ctx.lineTo(rightPixel, chartArea.bottom);
+        ctx.stroke();
+      }
+    }
+
+    // 4. Vertical Baseline Line
+    if (baselineVal !== null && baselineVal !== undefined) {
+      const basePixel = xScale.getPixelForValue(baselineVal);
+      if (!isNaN(basePixel)) {
+        ctx.strokeStyle = '#10b981';
+        ctx.lineWidth = 2;
+        ctx.setLineDash([6, 4]);
+        ctx.beginPath();
+        ctx.moveTo(basePixel, chartArea.top);
+        ctx.lineTo(basePixel, chartArea.bottom);
+        ctx.stroke();
+      }
+    }
+
+    ctx.restore();
+  }
+};
+
 ChartJS.register(
   CategoryScale,
   LinearScale,
@@ -32,7 +192,9 @@ ChartJS.register(
   Tooltip,
   Legend,
   TimeScale,
-  Filler
+  Filler,
+  horizontalToleranceBandPlugin,
+  verticalToleranceBandPlugin
 );
 
 export default function ChartCanvas({
@@ -91,7 +253,6 @@ export default function ChartCanvas({
     const bVal = baselineConfig.baseline !== '' && baselineConfig.baseline !== undefined && !isNaN(Number(baselineConfig.baseline))
       ? parseFloat(baselineConfig.baseline)
       : null;
-    if (bVal === null) return null;
 
     const uTol = baselineConfig.upperTol !== '' && baselineConfig.upperTol !== undefined && !isNaN(Number(baselineConfig.upperTol))
       ? Math.abs(parseFloat(baselineConfig.upperTol))
@@ -102,6 +263,17 @@ export default function ChartCanvas({
       : (baselineConfig.lowerTol !== '' && baselineConfig.lowerTol !== undefined && !isNaN(Number(baselineConfig.lowerTol))
           ? Math.abs(parseFloat(baselineConfig.lowerTol))
           : null);
+
+    if (bVal === null) {
+      if (uTol === null && lTol === null) return null;
+      return {
+        baseline: uTol !== null && lTol !== null ? (uTol + lTol) / 2 : (uTol ?? lTol),
+        upperTol: uTol,
+        lowerTol: lTol,
+        upperLimit: uTol,
+        lowerLimit: lTol
+      };
+    }
 
     const upperLimit = uTol !== null ? bVal + uTol : null;
     const lowerLimit = lTol !== null ? bVal - lTol : null;
@@ -114,74 +286,6 @@ export default function ChartCanvas({
       lowerLimit
     };
   }, [baselineConfig]);
-
-  // Chart.js Canvas plugin for horizontal shaded tolerance band (Scatter/Line)
-  const horizontalToleranceBandPlugin = useMemo(() => {
-    if (!baselineInfo || (baselineInfo.upperLimit === null && baselineInfo.lowerLimit === null)) {
-      return null;
-    }
-    const topVal = baselineInfo.upperLimit !== null ? baselineInfo.upperLimit : baselineInfo.baseline;
-    const bottomVal = baselineInfo.lowerLimit !== null ? baselineInfo.lowerLimit : baselineInfo.baseline;
-
-    return {
-      id: 'horizontalToleranceBand',
-      beforeDatasetsDraw: (chart) => {
-        const { ctx, chartArea, scales } = chart;
-        const yScale = scales?.y;
-        if (!ctx || !chartArea || !yScale) return;
-
-        const topPixel = yScale.getPixelForValue(topVal);
-        const bottomPixel = yScale.getPixelForValue(bottomVal);
-        if (isNaN(topPixel) || isNaN(bottomPixel)) return;
-
-        const y = Math.min(topPixel, bottomPixel);
-        const height = Math.abs(bottomPixel - topPixel);
-        const width = chartArea.width || (chartArea.right - chartArea.left);
-
-        ctx.save();
-        ctx.beginPath();
-        ctx.rect(chartArea.left, chartArea.top, width, chartArea.height || (chartArea.bottom - chartArea.top));
-        ctx.clip();
-        ctx.fillStyle = 'rgba(34, 197, 94, 0.18)'; // Vivid green shaded area matching box & whisker
-        ctx.fillRect(chartArea.left, y, width, height);
-        ctx.restore();
-      }
-    };
-  }, [baselineInfo]);
-
-  // Chart.js Canvas plugin for vertical shaded tolerance band (Normal Distribution)
-  const verticalToleranceBandPlugin = useMemo(() => {
-    if (!baselineInfo || (baselineInfo.upperLimit === null && baselineInfo.lowerLimit === null)) {
-      return null;
-    }
-    const leftVal = baselineInfo.lowerLimit !== null ? baselineInfo.lowerLimit : baselineInfo.baseline;
-    const rightVal = baselineInfo.upperLimit !== null ? baselineInfo.upperLimit : baselineInfo.baseline;
-
-    return {
-      id: 'verticalToleranceBand',
-      beforeDatasetsDraw: (chart) => {
-        const { ctx, chartArea, scales } = chart;
-        const xScale = scales?.x;
-        if (!ctx || !chartArea || !xScale) return;
-
-        const leftPixel = xScale.getPixelForValue(leftVal);
-        const rightPixel = xScale.getPixelForValue(rightVal);
-        if (isNaN(leftPixel) || isNaN(rightPixel)) return;
-
-        const x = Math.min(leftPixel, rightPixel);
-        const width = Math.abs(rightPixel - leftPixel);
-        const height = chartArea.height || (chartArea.bottom - chartArea.top);
-
-        ctx.save();
-        ctx.beginPath();
-        ctx.rect(chartArea.left, chartArea.top, chartArea.width || (chartArea.right - chartArea.left), height);
-        ctx.clip();
-        ctx.fillStyle = 'rgba(34, 197, 94, 0.18)'; // Vivid green shaded area
-        ctx.fillRect(x, chartArea.top, width, height);
-        ctx.restore();
-      }
-    };
-  }, [baselineInfo]);
 
   const handleChartClick = (e) => {
     if (e.button !== 0) return;
@@ -405,6 +509,12 @@ export default function ChartCanvas({
       responsive: true,
       maintainAspectRatio: false,
       plugins: {
+        verticalToleranceBand: {
+          enabled: Boolean(baselineInfo && (baselineInfo.upperLimit !== null || baselineInfo.lowerLimit !== null || baselineInfo.baseline !== null)),
+          leftVal: baselineInfo?.lowerLimit !== null ? baselineInfo?.lowerLimit : null,
+          rightVal: baselineInfo?.upperLimit !== null ? baselineInfo?.upperLimit : null,
+          baselineVal: baselineInfo?.baseline !== null && baselineInfo?.baseline !== undefined ? baselineInfo.baseline : null
+        },
         legend: { position: 'top' },
         tooltip: {
           callbacks: {
@@ -428,10 +538,10 @@ export default function ChartCanvas({
 
     chartComponent = (
       <Line
+        key={`normal_${baselineConfig?.enabled ? 'on' : 'off'}_${baselineConfig?.baseline}_${baselineConfig?.upperTol}_${baselineConfig?.lowerTol}`}
         ref={chartRef}
         data={{ datasets: normalDatasets }}
         options={normalOptions}
-        plugins={verticalToleranceBandPlugin ? [verticalToleranceBandPlugin] : []}
       />
     );
   } else {
@@ -640,7 +750,12 @@ export default function ChartCanvas({
         }
       },
       plugins: {
-        horizontalToleranceBand: { display: true },
+        horizontalToleranceBand: {
+          enabled: Boolean(baselineInfo && (baselineInfo.upperLimit !== null || baselineInfo.lowerLimit !== null || baselineInfo.baseline !== null)),
+          topVal: baselineInfo?.upperLimit !== null ? baselineInfo?.upperLimit : null,
+          bottomVal: baselineInfo?.lowerLimit !== null ? baselineInfo?.lowerLimit : null,
+          baselineVal: baselineInfo?.baseline !== null && baselineInfo?.baseline !== undefined ? baselineInfo.baseline : null
+        },
         legend: { position: 'top' },
         tooltip: {
           callbacks: {
@@ -651,7 +766,7 @@ export default function ChartCanvas({
               const lines = [];
               if (meta.testList) lines.push(`Test List: ${meta.testList}`);
               if (meta['Patient ID'] || meta['Patient QA Patient ID']) lines.push(`Patient ID: ${meta['Patient ID'] || meta['Patient QA Patient ID']}`);
-              const planVal = meta['Plan ID'] || meta['Plan Name'];
+              const planVal = meta['Plan ID'] || meta['Patient QA Plan'] || meta['patient_qa_plan_id'] || meta['Plan Name'];
               if (planVal) lines.push(`Plan ID: ${planVal}`);
               if (meta.date) lines.push(`Date: ${meta.date.substring(0, 10)}`);
               if (meta.unit) lines.push(`Unit: ${meta.unit}`);
@@ -693,17 +808,29 @@ export default function ChartCanvas({
           title: {
             display: true,
             text: yVariable
-          }
+          },
+          suggestedMin: baselineInfo && (baselineInfo.lowerLimit !== null || baselineInfo.baseline !== null)
+            ? Math.min(
+                baselineInfo.lowerLimit !== null ? baselineInfo.lowerLimit : baselineInfo.baseline,
+                baselineInfo.baseline !== null ? baselineInfo.baseline : Infinity
+              )
+            : undefined,
+          suggestedMax: baselineInfo && (baselineInfo.upperLimit !== null || baselineInfo.baseline !== null)
+            ? Math.max(
+                baselineInfo.upperLimit !== null ? baselineInfo.upperLimit : baselineInfo.baseline,
+                baselineInfo.baseline !== null ? baselineInfo.baseline : -Infinity
+              )
+            : undefined
         }
       }
     };
 
     chartComponent = (
       <Line
+        key={`plot_${displayMode}_${baselineConfig?.enabled ? 'on' : 'off'}_${baselineConfig?.baseline}_${baselineConfig?.upperTol}_${baselineConfig?.lowerTol}_${baselineConfig?.symmetric}`}
         ref={chartRef}
         data={{ datasets: chartDatasets }}
         options={options}
-        plugins={horizontalToleranceBandPlugin ? [horizontalToleranceBandPlugin] : []}
       />
     );
   }
