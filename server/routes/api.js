@@ -69,6 +69,169 @@ router.post('/config', (req, res) => {
   }
 });
 
+// 2b. Backup All Settings & Presets to JSON
+router.get(['/settings/backup', '/backup/export'], (req, res) => {
+  try {
+    const settingsRows = db.prepare('SELECT key, value FROM settings').all();
+    const settingsObj = {};
+    for (const row of settingsRows) {
+      settingsObj[row.key] = row.value;
+    }
+
+    const presetRows = db.prepare('SELECT * FROM presets ORDER BY order_index ASC, id ASC').all();
+    const presets = presetRows.map(p => {
+      let parsedConfig = {};
+      try {
+        parsedConfig = typeof p.config_json === 'string' ? JSON.parse(p.config_json) : (p.config || {});
+      } catch (_) {}
+      return {
+        name: p.name,
+        description: p.description || '',
+        order_index: p.order_index || 0,
+        config: parsedConfig
+      };
+    });
+
+    const dateStr = new Date().toISOString().split('T')[0];
+    const filename = `qadence_backup_${dateStr}.json`;
+
+    const exportData = {
+      app: 'QAdence',
+      version: '1.1.0',
+      backupType: 'full_settings_and_presets',
+      exportedAt: new Date().toISOString(),
+      settings: settingsObj,
+      presets: presets
+    };
+
+    res.setHeader('Content-Type', 'application/json');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    res.json(exportData);
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// 2c. Restore All Settings & Presets from JSON
+router.post(['/settings/restore', '/backup/restore'], (req, res) => {
+  try {
+    const payload = req.body;
+    if (!payload || typeof payload !== 'object') {
+      return res.status(400).json({ success: false, error: 'Invalid backup JSON payload.' });
+    }
+
+    let restoredSettingsCount = 0;
+    let restoredPresetsCount = 0;
+
+    // Detect settings in payload (supports payload.settings object or top-level keys)
+    const settingsToRestore = {};
+    if (payload.settings && typeof payload.settings === 'object') {
+      Object.assign(settingsToRestore, payload.settings);
+    } else {
+      if (payload.baseUrl !== undefined || payload.qatrack_url !== undefined) {
+        settingsToRestore.qatrack_url = payload.baseUrl || payload.qatrack_url;
+      }
+      if (payload.token !== undefined || payload.qatrack_token !== undefined) {
+        settingsToRestore.qatrack_token = payload.token || payload.qatrack_token;
+      }
+      if (payload.authType !== undefined || payload.qatrack_auth_type !== undefined) {
+        settingsToRestore.qatrack_auth_type = payload.authType || payload.qatrack_auth_type;
+      }
+      if (payload.includeUnapproved !== undefined || payload.qatrack_include_unapproved !== undefined) {
+        settingsToRestore.qatrack_include_unapproved = String(payload.includeUnapproved ?? payload.qatrack_include_unapproved);
+      }
+      if (payload.includeRejected !== undefined || payload.qatrack_include_rejected !== undefined) {
+        settingsToRestore.qatrack_include_rejected = String(payload.includeRejected ?? payload.qatrack_include_rejected);
+      }
+    }
+
+    // Detect presets in payload
+    let presetsToRestore = [];
+    if (Array.isArray(payload.presets)) {
+      presetsToRestore = payload.presets;
+    } else if (Array.isArray(payload)) {
+      presetsToRestore = payload;
+    }
+
+    const replacePresets = Boolean(payload.replacePresets);
+
+    const restoreTx = db.transaction(() => {
+      // 1. Restore settings
+      const upsertSetting = db.prepare(`
+        INSERT INTO settings (key, value) VALUES (?, ?)
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value
+      `);
+
+      for (const [key, val] of Object.entries(settingsToRestore)) {
+        if (typeof key === 'string' && key.trim() && val !== undefined && val !== null) {
+          upsertSetting.run(key.trim(), String(val));
+          restoredSettingsCount++;
+        }
+      }
+
+      // 2. Restore presets
+      if (presetsToRestore.length > 0) {
+        if (replacePresets) {
+          db.prepare('DELETE FROM presets').run();
+        }
+
+        const checkExisting = db.prepare('SELECT id, name FROM presets WHERE LOWER(name) = ?');
+        const updatePresetStmt = db.prepare(`
+          UPDATE presets 
+          SET description = ?, config_json = ?, order_index = ?, updated_at = CURRENT_TIMESTAMP 
+          WHERE id = ?
+        `);
+        const insertPresetStmt = db.prepare(`
+          INSERT INTO presets (name, description, config_json, order_index, updated_at) 
+          VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+        `);
+        const maxOrderRow = db.prepare('SELECT COALESCE(MAX(order_index), 0) as maxOrder FROM presets').get();
+        let currentOrder = maxOrderRow?.maxOrder || 0;
+
+        for (const p of presetsToRestore) {
+          if (!p || typeof p !== 'object') continue;
+          const rawName = String(p.name || '').trim();
+          if (!rawName) continue;
+
+          let configObj = p.config;
+          if (!configObj && p.config_json) {
+            try {
+              configObj = typeof p.config_json === 'string' ? JSON.parse(p.config_json) : p.config_json;
+            } catch (_) {}
+          }
+          if (!configObj || typeof configObj !== 'object') continue;
+
+          const configJson = JSON.stringify(configObj);
+          const description = String(p.description || '').trim();
+          const orderIndex = typeof p.order_index === 'number' ? p.order_index : ++currentOrder;
+
+          const existing = checkExisting.get(rawName.toLowerCase());
+          if (existing && !replacePresets) {
+            updatePresetStmt.run(description, configJson, orderIndex, existing.id);
+            restoredPresetsCount++;
+          } else {
+            insertPresetStmt.run(rawName, description, configJson, orderIndex);
+            restoredPresetsCount++;
+          }
+        }
+      }
+    });
+
+    restoreTx();
+    qatrackClient.reloadConfig();
+
+    res.json({
+      success: true,
+      message: `Successfully restored ${restoredSettingsCount} configuration setting(s) and ${restoredPresetsCount} preset(s).`,
+      restoredSettingsCount,
+      restoredPresetsCount,
+      config: qatrackClient.getConfig()
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 // 3. Test Connection
 router.post('/test-connection', async (req, res) => {
   try {

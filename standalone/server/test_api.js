@@ -723,6 +723,63 @@ const server = app.listen(5099, async () => {
     }
     console.log('Verified: Multiple conditional filters with AND and OR combination logic work properly!');
 
+    console.log('Testing /api/settings/backup and /api/settings/restore...');
+    // Seed some specific settings and presets
+    db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('qatrack_url', 'http://backup-source.local:8000')").run();
+    db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('qatrack_token', 'source-token-xyz')").run();
+    db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('qatrack_auth_type', 'Api-Key')").run();
+    db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('qatrack_include_unapproved', 'true')").run();
+    db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('qatrack_include_rejected', 'false')").run();
+
+    db.prepare("DELETE FROM presets").run();
+    db.prepare(`
+      INSERT INTO presets (name, description, config_json, order_index)
+      VALUES ('Source Preset 1', 'Preset from source', '{"yVariable":"Gamma Pass Rate (3%/3mm)"}', 1)
+    `).run();
+
+    // 1. Export backup
+    const backupRes = await axios.get(`${base}/settings/backup`);
+    if (!backupRes.data || backupRes.data.app !== 'QAdence' || !backupRes.data.settings || !Array.isArray(backupRes.data.presets)) {
+      throw new Error('Backup export returned invalid structure');
+    }
+    if (backupRes.data.settings.qatrack_url !== 'http://backup-source.local:8000') {
+      throw new Error(`Backup export has incorrect qatrack_url: ${backupRes.data.settings.qatrack_url}`);
+    }
+    if (backupRes.data.presets.length !== 1 || backupRes.data.presets[0].name !== 'Source Preset 1') {
+      throw new Error('Backup export has incorrect presets');
+    }
+
+    // 2. Modify settings and presets to simulate a new/wiped environment
+    db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('qatrack_url', 'http://changed.local:9999')").run();
+    db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('qatrack_token', 'changed-token')").run();
+    db.prepare(`
+      INSERT INTO presets (name, description, config_json, order_index)
+      VALUES ('Temporary Preset', 'Will be wiped or merged', '{"yVariable":"Dummy"}', 2)
+    `).run();
+
+    // 3. Restore with replacePresets: true
+    const restoreRes = await axios.post(`${base}/settings/restore`, {
+      ...backupRes.data,
+      replacePresets: true
+    });
+    if (!restoreRes.data.success) {
+      throw new Error('Restore failed');
+    }
+
+    // Check restored settings in DB
+    const restoredUrlRow = db.prepare("SELECT value FROM settings WHERE key = 'qatrack_url'").get();
+    if (restoredUrlRow?.value !== 'http://backup-source.local:8000') {
+      throw new Error(`Restored setting mismatch: expected http://backup-source.local:8000, got ${restoredUrlRow?.value}`);
+    }
+
+    // Check restored presets in DB
+    const allPresets = db.prepare("SELECT name FROM presets").all();
+    if (allPresets.length !== 1 || allPresets[0].name !== 'Source Preset 1') {
+      throw new Error(`Restored presets mismatch with replacePresets=true: ${JSON.stringify(allPresets)}`);
+    }
+
+    console.log('Verified: /api/settings/backup and /api/settings/restore work perfectly!');
+
     console.log('ALL API TESTS PASSED SUCCESSFULLY!');
   } catch (err) {
     console.error('Test failed:', err.response?.data || err.message);
