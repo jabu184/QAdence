@@ -669,6 +669,18 @@ const server = app.listen(5099, async () => {
       }
     }
 
+    // Verify Previous and Following tolerance level resolution (Action, Tolerance, OK)
+    db.prepare(`UPDATE test_values SET pass_fail = 'tolerance' WHERE session_id = ? AND test_name = 'Output 6MV'`).run(sMonthly);
+    db.prepare(`UPDATE test_values SET pass_fail = 'action' WHERE session_id = ? AND test_name = 'Output 6MV'`).run(sAdHoc);
+    const histTolRes = await axios.get(`${base}/session-details/${sWeekly}`);
+    const histTolTest = histTolRes.data.testValues.find(tv => tv.test_name === 'Output 6MV');
+    if (!histTolTest.previous || histTolTest.previous.toleranceLevel !== 'tolerance') {
+      throw new Error(`Expected previous.toleranceLevel 'tolerance', got: ${JSON.stringify(histTolTest.previous)}`);
+    }
+    if (!histTolTest.following || histTolTest.following.toleranceLevel !== 'action') {
+      throw new Error(`Expected following.toleranceLevel 'action', got: ${JSON.stringify(histTolTest.following)}`);
+    }
+
     // Test No Tolerance level mapping (blue 'no_tolerance')
     db.prepare(`UPDATE test_values SET pass_fail = 'no_tol' WHERE session_id = ? AND test_name = 'Output 6MV'`).run(sWeekly);
     const noTolRes = await axios.get(`${base}/session-details/${sWeekly}`);

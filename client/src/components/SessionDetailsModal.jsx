@@ -69,6 +69,8 @@ export default function SessionDetailsModal({
     return (
       (tv.test_name && tv.test_name.toLowerCase().includes(q)) ||
       (tv.value_string && tv.value_string.toLowerCase().includes(q)) ||
+      (tv.previous && tv.previous.value_string && tv.previous.value_string.toLowerCase().includes(q)) ||
+      (tv.following && tv.following.value_string && tv.following.value_string.toLowerCase().includes(q)) ||
       (tv.unit && tv.unit.toLowerCase().includes(q)) ||
       (tv.reviewStatus && tv.reviewStatus.toLowerCase().includes(q)) ||
       (tv.toleranceLevel && tv.toleranceLevel.toLowerCase().includes(q))
@@ -377,9 +379,9 @@ export default function SessionDetailsModal({
                     <thead>
                       <tr style={{ background: '#f8fafc', borderBottom: '1px solid #e2e8f0', color: '#475569' }}>
                         <th style={{ padding: '9px 12px', fontWeight: '700', width: '30%' }}>Test Name</th>
-                        <th style={{ padding: '9px 12px', fontWeight: '700', width: '20%' }}>Previous Reading</th>
+                        <th style={{ padding: '9px 12px', fontWeight: '700', width: '20%' }}>Previous</th>
                         <th style={{ padding: '9px 12px', fontWeight: '700', width: '20%' }}>Current Value</th>
-                        <th style={{ padding: '9px 12px', fontWeight: '700', width: '20%' }}>Following Reading</th>
+                        <th style={{ padding: '9px 12px', fontWeight: '700', width: '20%' }}>Following</th>
                         <th style={{ padding: '9px 12px', fontWeight: '700', width: '10%' }}>Status</th>
                       </tr>
                     </thead>
@@ -414,12 +416,21 @@ export default function SessionDetailsModal({
                                 )}
                               </td>
 
-                              {/* Previous Reading */}
+                              {/* Previous */}
                               <td style={{ padding: '9px 12px', color: '#1e293b' }}>
                                 {tv.previous ? (
                                   <span
-                                    title={`Previous reading on ${new Date(tv.previous.date).toLocaleDateString()}: ${tv.previous.value_string}${tv.unit ? ' ' + tv.unit : ''}`}
-                                    style={{ fontFamily: 'monospace', fontWeight: '700', fontSize: '0.88rem', color: '#0f172a' }}
+                                    title={`Previous reading on ${new Date(tv.previous.date).toLocaleDateString()}: ${tv.previous.value_string}${tv.unit ? ' ' + tv.unit : ''}${tv.previous.toleranceLevel === 'action' ? ' (Action level)' : tv.previous.toleranceLevel === 'tolerance' ? ' (Tolerance level)' : ''}`}
+                                    style={{
+                                      fontFamily: 'monospace',
+                                      fontWeight: (tv.previous.toleranceLevel === 'action' || tv.previous.toleranceLevel === 'tolerance') ? '800' : '700',
+                                      fontSize: '0.88rem',
+                                      color: tv.previous.toleranceLevel === 'action'
+                                        ? '#dc2626'
+                                        : tv.previous.toleranceLevel === 'tolerance'
+                                        ? '#d97706'
+                                        : '#0f172a'
+                                    }}
                                   >
                                     {tv.previous.value_string}
                                   </span>
@@ -444,12 +455,21 @@ export default function SessionDetailsModal({
                                 </span>
                               </td>
 
-                              {/* Following Reading */}
+                              {/* Following */}
                               <td style={{ padding: '9px 12px', color: '#1e293b' }}>
                                 {tv.following ? (
                                   <span
-                                    title={`Following reading on ${new Date(tv.following.date).toLocaleDateString()}: ${tv.following.value_string}${tv.unit ? ' ' + tv.unit : ''}`}
-                                    style={{ fontFamily: 'monospace', fontWeight: '700', fontSize: '0.88rem', color: '#0f172a' }}
+                                    title={`Following reading on ${new Date(tv.following.date).toLocaleDateString()}: ${tv.following.value_string}${tv.unit ? ' ' + tv.unit : ''}${tv.following.toleranceLevel === 'action' ? ' (Action level)' : tv.following.toleranceLevel === 'tolerance' ? ' (Tolerance level)' : ''}`}
+                                    style={{
+                                      fontFamily: 'monospace',
+                                      fontWeight: (tv.following.toleranceLevel === 'action' || tv.following.toleranceLevel === 'tolerance') ? '800' : '700',
+                                      fontSize: '0.88rem',
+                                      color: tv.following.toleranceLevel === 'action'
+                                        ? '#dc2626'
+                                        : tv.following.toleranceLevel === 'tolerance'
+                                        ? '#d97706'
+                                        : '#0f172a'
+                                    }}
                                   >
                                     {tv.following.value_string}
                                   </span>

@@ -971,6 +971,32 @@ function sanitizeComments(raw) {
   return '';
 }
 
+function resolveToleranceLevel(passFail, status, tolMin, tolMax, valNum) {
+  const pFail = (passFail || '').toLowerCase().trim();
+  const st = (status || '').toLowerCase().trim();
+  if (pFail === 'no_tol' || pFail === 'no_tolerance' || pFail === 'not_set' || pFail.includes('no_tol') || pFail === 'none') {
+    return 'no_tolerance';
+  }
+  if (pFail.includes('action') || st.includes('action') || pFail === 'fail' || st === 'fail') {
+    return 'action';
+  }
+  if ((pFail.includes('tolerance') && !pFail.includes('no_tol')) || pFail === 'tol' || st === 'tolerance' || st === 'tol' || st.includes('warn')) {
+    return 'tolerance';
+  }
+  if (valNum !== null && valNum !== undefined && !isNaN(valNum)) {
+    if (tolMin !== null && tolMin !== undefined && !isNaN(tolMin) && valNum < tolMin) {
+      return 'action';
+    }
+    if (tolMax !== null && tolMax !== undefined && !isNaN(tolMax) && valNum > tolMax) {
+      return 'action';
+    }
+  }
+  if (!pFail && (tolMin === null || tolMin === undefined) && (tolMax === null || tolMax === undefined)) {
+    return 'no_tolerance';
+  }
+  return 'ok';
+}
+
 // 8b. Session Details & Associated Test List Values (for Pop-up Splash)
 router.get(['/session-details/:id', '/sessions/:id/details'], async (req, res) => {
   try {
@@ -1021,7 +1047,7 @@ router.get(['/session-details/:id', '/sessions/:id/details'], async (req, res) =
     }
 
     const getPrevStmt = db.prepare(`
-      SELECT tv.value_string, tv.value_numeric, tv.unit, tv.status, tv.pass_fail, s.work_completed, s.id as session_id, td.formatting
+      SELECT tv.value_string, tv.value_numeric, tv.unit, tv.status, tv.pass_fail, tv.tolerance_min, tv.tolerance_max, s.work_completed, s.id as session_id, td.formatting
       FROM test_values tv
       JOIN sessions s ON tv.session_id = s.id
       LEFT JOIN (SELECT name, MAX(formatting) as formatting FROM test_definitions GROUP BY name) td ON tv.test_name = td.name
@@ -1032,7 +1058,7 @@ router.get(['/session-details/:id', '/sessions/:id/details'], async (req, res) =
     `);
 
     const getNextStmt = db.prepare(`
-      SELECT tv.value_string, tv.value_numeric, tv.unit, tv.status, tv.pass_fail, s.work_completed, s.id as session_id, td.formatting
+      SELECT tv.value_string, tv.value_numeric, tv.unit, tv.status, tv.pass_fail, tv.tolerance_min, tv.tolerance_max, s.work_completed, s.id as session_id, td.formatting
       FROM test_values tv
       JOIN sessions s ON tv.session_id = s.id
       LEFT JOIN (SELECT name, MAX(formatting) as formatting FROM test_definitions GROUP BY name) td ON tv.test_name = td.name
@@ -1057,19 +1083,7 @@ router.get(['/session-details/:id', '/sessions/:id/details'], async (req, res) =
       // - 'tolerance' (amber) strictly when value is outside tolerance level but within action level
       // - 'action' (red) when outside action level
       // - 'ok' when passing within tolerance
-      const pFail = (tv.pass_fail || '').toLowerCase().trim();
-      const st = (tv.status || '').toLowerCase().trim();
-      let toleranceLevel = 'ok';
-
-      if (pFail === 'no_tol' || pFail === 'no_tolerance' || pFail === 'not_set' || pFail.includes('no_tol') || pFail === 'none') {
-        toleranceLevel = 'no_tolerance';
-      } else if (pFail.includes('action') || st.includes('action') || pFail === 'fail' || st === 'fail') {
-        toleranceLevel = 'action';
-      } else if ((pFail.includes('tolerance') && !pFail.includes('no_tol')) || pFail === 'tol' || st === 'tolerance' || st === 'tol' || st.includes('warn')) {
-        toleranceLevel = 'tolerance';
-      } else if (!pFail && tv.tolerance_min === null && tv.tolerance_max === null) {
-        toleranceLevel = 'no_tolerance';
-      }
+      const toleranceLevel = resolveToleranceLevel(tv.pass_fail, tv.status, tv.tolerance_min, tv.tolerance_max, tv.value_numeric);
 
       // 3. Review status (Approved, Unreviewed, etc.)
       let reviewStatus = tv.status || 'Approved';
@@ -1089,9 +1103,13 @@ router.get(['/session-details/:id', '/sessions/:id/details'], async (req, res) =
             prevDisplay = prevRow.value_numeric !== null ? String(prevRow.value_numeric) : '';
           }
           const { diffPercent, arrow } = calculateDiffAndArrow(prevRow.value_numeric, tv.value_numeric);
+          const prevTolMin = (prevRow.tolerance_min !== null && prevRow.tolerance_min !== undefined) ? prevRow.tolerance_min : tv.tolerance_min;
+          const prevTolMax = (prevRow.tolerance_max !== null && prevRow.tolerance_max !== undefined) ? prevRow.tolerance_max : tv.tolerance_max;
+          const prevTolLevel = resolveToleranceLevel(prevRow.pass_fail, prevRow.status, prevTolMin, prevTolMax, prevRow.value_numeric);
           previous = {
             value_string: prevDisplay,
             value_numeric: prevRow.value_numeric,
+            toleranceLevel: prevTolLevel,
             diffPercent,
             arrow,
             date: prevRow.work_completed,
@@ -1112,9 +1130,13 @@ router.get(['/session-details/:id', '/sessions/:id/details'], async (req, res) =
             nextDisplay = nextRow.value_numeric !== null ? String(nextRow.value_numeric) : '';
           }
           const { diffPercent, arrow } = calculateDiffAndArrow(nextRow.value_numeric, tv.value_numeric);
+          const nextTolMin = (nextRow.tolerance_min !== null && nextRow.tolerance_min !== undefined) ? nextRow.tolerance_min : tv.tolerance_min;
+          const nextTolMax = (nextRow.tolerance_max !== null && nextRow.tolerance_max !== undefined) ? nextRow.tolerance_max : tv.tolerance_max;
+          const nextTolLevel = resolveToleranceLevel(nextRow.pass_fail, nextRow.status, nextTolMin, nextTolMax, nextRow.value_numeric);
           following = {
             value_string: nextDisplay,
             value_numeric: nextRow.value_numeric,
+            toleranceLevel: nextTolLevel,
             diffPercent,
             arrow,
             date: nextRow.work_completed,
