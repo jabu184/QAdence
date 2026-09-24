@@ -7,7 +7,8 @@ export default function BoxWhiskerPlot({
   datasetResults = {},
   ignoredSessionIds = [],
   yVariable,
-  baselineConfig
+  baselineConfig,
+  onInspectSession
 }) {
   const [hoveredData, setHoveredData] = useState(null);
   const [tooltipPos, setTooltipPos] = useState({ x: 0, y: 0 });
@@ -437,16 +438,27 @@ export default function BoxWhiskerPlot({
                 {/* Outliers */}
                 {stats.outliers && stats.outliers.map((outlierVal, oIdx) => {
                   const oY = getY(outlierVal);
+                  const allPts = datasetResults[dataset.id]?.dataPoints || [];
+                  const matchingPt = allPts.find(p => p.y === outlierVal);
                   return (
                     <circle
                       key={oIdx}
                       cx={cx}
                       cy={oY}
-                      r="3.5"
+                      r="4"
                       fill="#dc2626"
                       stroke="#ffffff"
-                      strokeWidth="1"
-                    />
+                      strokeWidth="1.5"
+                      style={{ cursor: onInspectSession && matchingPt ? 'pointer' : 'default' }}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        if (matchingPt && onInspectSession) {
+                          onInspectSession(matchingPt.sessionId);
+                        }
+                      }}
+                    >
+                      <title>{`Outlier: ${outlierVal}${matchingPt ? ' (Click to inspect QA session details)' : ''}`}</title>
+                    </circle>
                   );
                 })}
 

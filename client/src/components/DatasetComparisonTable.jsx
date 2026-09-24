@@ -11,7 +11,8 @@ export default function DatasetComparisonTable({
   yVariable,
   xVariable,
   trendlineConfig,
-  baselineConfig
+  baselineConfig,
+  onInspectSession
 }) {
   const ignoredSet = useMemo(() => new Set(ignoredSessionIds), [ignoredSessionIds]);
   const isDateX = !xVariable || xVariable === 'work_completed';
@@ -398,6 +399,7 @@ export default function DatasetComparisonTable({
         ignoredSessionIds={ignoredSessionIds}
         yVariable={yVariable}
         baselineConfig={baselineConfig}
+        onInspectSession={onInspectSession}
       />
 
       {/* Dual-Variable Statistical Correlation & Dependence Analysis */}

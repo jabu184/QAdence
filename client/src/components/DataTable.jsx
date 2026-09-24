@@ -1,12 +1,13 @@
 import React, { useState, useMemo } from 'react';
-import { Download, Search, EyeOff, RotateCcw } from 'lucide-react';
+import { Download, Search, EyeOff, RotateCcw, ListChecks } from 'lucide-react';
 
 export default function DataTable({
   tableRows = [],
   yVariable,
   xVariable,
   ignoredSessionIds = [],
-  onToggleIgnore
+  onToggleIgnore,
+  onInspectSession
 }) {
   const [search, setSearch] = useState('');
   const [sortField, setSortField] = useState('date');
@@ -218,32 +219,57 @@ export default function DataTable({
                   }}
                 >
                   <td style={{ padding: '8px 12px', textDecoration: 'none' }}>
-                    <button
-                      onClick={() => onToggleIgnore && onToggleIgnore(r.sessionId)}
-                      title={isIgnored ? 'Restore point' : 'Ignore / Exclude from plot'}
-                      style={{
-                        padding: '3px 8px',
-                        borderRadius: '6px',
-                        fontSize: '0.75rem',
-                        fontWeight: '600',
-                        display: 'flex',
-                        alignItems: 'center',
-                        gap: '4px',
-                        background: isIgnored ? '#ecfdf5' : '#fff1f2',
-                        color: isIgnored ? '#059669' : '#e11d48',
-                        border: `1px solid ${isIgnored ? '#a7f3d0' : '#fecdd3'}`
-                      }}
-                    >
-                      {isIgnored ? (
-                        <>
-                          <RotateCcw size={12} /> Restore
-                        </>
-                      ) : (
-                        <>
-                          <EyeOff size={12} /> Ignore
-                        </>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '5px' }}>
+                      {onInspectSession && (
+                        <button
+                          type="button"
+                          onClick={() => onInspectSession(r.sessionId)}
+                          title="View complete session details and test list values"
+                          style={{
+                            padding: '3px 8px',
+                            borderRadius: '6px',
+                            fontSize: '0.75rem',
+                            fontWeight: '600',
+                            display: 'flex',
+                            alignItems: 'center',
+                            gap: '4px',
+                            background: '#eff6ff',
+                            color: '#2563eb',
+                            border: '1px solid #bfdbfe',
+                            cursor: 'pointer'
+                          }}
+                        >
+                          <ListChecks size={12} /> View
+                        </button>
                       )}
-                    </button>
+                      <button
+                        onClick={() => onToggleIgnore && onToggleIgnore(r.sessionId)}
+                        title={isIgnored ? 'Restore point' : 'Ignore / Exclude from plot'}
+                        style={{
+                          padding: '3px 8px',
+                          borderRadius: '6px',
+                          fontSize: '0.75rem',
+                          fontWeight: '600',
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: '4px',
+                          background: isIgnored ? '#ecfdf5' : '#fff1f2',
+                          color: isIgnored ? '#059669' : '#e11d48',
+                          border: `1px solid ${isIgnored ? '#a7f3d0' : '#fecdd3'}`,
+                          cursor: 'pointer'
+                        }}
+                      >
+                        {isIgnored ? (
+                          <>
+                            <RotateCcw size={12} /> Restore
+                          </>
+                        ) : (
+                          <>
+                            <EyeOff size={12} /> Ignore
+                          </>
+                        )}
+                      </button>
+                    </div>
                   </td>
                   <td style={{ padding: '8px 12px', whiteSpace: 'nowrap' }}>{r.date?.substring(0, 10)}</td>
                   <td style={{ padding: '8px 12px', fontWeight: '500' }}>{r.unit}</td>

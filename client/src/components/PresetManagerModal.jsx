@@ -3,6 +3,7 @@ import {
   X,
   Bookmark,
   SlidersHorizontal,
+  Search,
   Download,
   Upload,
   Pencil,
@@ -27,6 +28,7 @@ export default function PresetManagerModal({
   onPresetsUpdated
 }) {
   const [localPresets, setLocalPresets] = useState([]);
+  const [searchQuery, setSearchQuery] = useState('');
   const [editingId, setEditingId] = useState(null);
   const [editName, setEditName] = useState('');
   const [editDescription, setEditDescription] = useState('');
@@ -51,6 +53,7 @@ export default function PresetManagerModal({
 
   useEffect(() => {
     if (!isOpen) {
+      setSearchQuery('');
       setEditingId(null);
       setIsImportOpen(false);
       setParsedImportData(null);
@@ -574,7 +577,58 @@ export default function PresetManagerModal({
             </div>
           ) : (
             <div style={{ display: 'flex', flexDirection: 'column', gap: '0.65rem' }}>
-              {localPresets.map((preset, index) => {
+              {/* Preset Search Bar */}
+              <div style={{
+                position: 'relative',
+                display: 'flex',
+                alignItems: 'center',
+                marginBottom: '0.35rem'
+              }}>
+                <Search size={14} color="#94a3b8" style={{ position: 'absolute', left: '10px' }} />
+                <input
+                  type="text"
+                  placeholder="Search presets by name or description..."
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  style={{
+                    width: '100%',
+                    padding: '6px 30px 6px 30px',
+                    borderRadius: '8px',
+                    border: '1px solid #cbd5e1',
+                    fontSize: '0.82rem',
+                    background: '#f8fafc',
+                    color: '#0f172a',
+                    outline: 'none'
+                  }}
+                />
+                {searchQuery && (
+                  <button
+                    type="button"
+                    onClick={() => setSearchQuery('')}
+                    style={{
+                      position: 'absolute',
+                      right: '8px',
+                      background: 'none',
+                      border: 'none',
+                      cursor: 'pointer',
+                      color: '#94a3b8',
+                      padding: '2px',
+                      display: 'flex',
+                      alignItems: 'center'
+                    }}
+                  >
+                    <X size={13} />
+                  </button>
+                )}
+              </div>
+
+              {localPresets
+                .filter(p => {
+                  if (!searchQuery.trim()) return true;
+                  const q = searchQuery.toLowerCase().trim();
+                  return (p.name && p.name.toLowerCase().includes(q)) || (p.description && p.description.toLowerCase().includes(q));
+                })
+                .map((preset, index) => {
                 const isEditing = editingId === preset.id;
                 const isSelected = String(preset.id) === String(selectedPresetId);
                 const dsCount = Array.isArray(preset.config?.datasets) ? preset.config.datasets.length : 1;

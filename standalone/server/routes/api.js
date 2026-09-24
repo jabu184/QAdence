@@ -483,54 +483,65 @@ router.post('/query', async (req, res) => {
       sessionParams.push(dateTo);
     }
 
-    // Handle conditional test filters (e.g. Site == Prostate)
-    filters.forEach((filter, idx) => {
+    // Handle conditional test filters (e.g. Site == Prostate) with AND / OR combination support
+    const filterConditions = [];
+    filters.forEach((filter) => {
       if (filter.testName && filter.value !== undefined && filter.value !== '') {
         const paramVal = filter.value;
+        let clause = '';
+        let params = [];
+
         if (filter.operator === 'not_equals') {
-          sessionWhereClauses.push(`
-            s.id NOT IN (
-              SELECT session_id FROM test_values
-              WHERE test_name = ? AND value_string = ?
-            )
-          `);
-          sessionParams.push(filter.testName, paramVal);
+          clause = `s.id NOT IN (
+            SELECT session_id FROM test_values
+            WHERE test_name = ? AND value_string = ?
+          )`;
+          params = [filter.testName, paramVal];
         } else if (filter.operator === 'contains') {
-          sessionWhereClauses.push(`
-            s.id IN (
-              SELECT session_id FROM test_values
-              WHERE test_name = ? AND value_string LIKE ?
-            )
-          `);
-          sessionParams.push(filter.testName, `%${paramVal}%`);
+          clause = `s.id IN (
+            SELECT session_id FROM test_values
+            WHERE test_name = ? AND value_string LIKE ?
+          )`;
+          params = [filter.testName, `%${paramVal}%`];
         } else if (filter.operator === 'gt') {
-          sessionWhereClauses.push(`
-            s.id IN (
-              SELECT session_id FROM test_values
-              WHERE test_name = ? AND value_numeric > ?
-            )
-          `);
-          sessionParams.push(filter.testName, parseFloat(paramVal));
+          clause = `s.id IN (
+            SELECT session_id FROM test_values
+            WHERE test_name = ? AND value_numeric > ?
+          )`;
+          params = [filter.testName, parseFloat(paramVal)];
         } else if (filter.operator === 'lt') {
-          sessionWhereClauses.push(`
-            s.id IN (
-              SELECT session_id FROM test_values
-              WHERE test_name = ? AND value_numeric < ?
-            )
-          `);
-          sessionParams.push(filter.testName, parseFloat(paramVal));
+          clause = `s.id IN (
+            SELECT session_id FROM test_values
+            WHERE test_name = ? AND value_numeric < ?
+          )`;
+          params = [filter.testName, parseFloat(paramVal)];
         } else {
           // Default equals
-          sessionWhereClauses.push(`
-            s.id IN (
-              SELECT session_id FROM test_values
-              WHERE test_name = ? AND (value_string = ? OR value_numeric = ?)
-            )
-          `);
-          sessionParams.push(filter.testName, paramVal, parseFloat(paramVal) || null);
+          clause = `s.id IN (
+            SELECT session_id FROM test_values
+            WHERE test_name = ? AND (value_string = ? OR value_numeric = ?)
+          )`;
+          params = [filter.testName, paramVal, parseFloat(paramVal) || null];
         }
+
+        const logic = filter.logic || req.body.filterLogic || 'and';
+        filterConditions.push({ clause, params, logic });
       }
     });
+
+    if (filterConditions.length > 0) {
+      let filterSql = '';
+      filterConditions.forEach((fc, idx) => {
+        if (idx === 0) {
+          filterSql += `(${fc.clause})`;
+        } else {
+          const op = (fc.logic && fc.logic.toUpperCase() === 'OR') ? 'OR' : 'AND';
+          filterSql += ` ${op} (${fc.clause})`;
+        }
+        sessionParams.push(...fc.params);
+      });
+      sessionWhereClauses.push(`(${filterSql})`);
+    }
 
     const whereSql = sessionWhereClauses.length > 0
       ? `WHERE ${sessionWhereClauses.join(' AND ')}`
@@ -538,7 +549,7 @@ router.post('/query', async (req, res) => {
 
     // Fetch matching sessions
     const sessionQuery = `
-      SELECT s.id, s.unit_name, s.test_list_name, s.work_completed, s.status, s.created_by, s.comments
+      SELECT s.id, s.qatrack_instance_id, s.unit_name, s.test_list_name, s.work_completed, s.status, s.created_by, s.comments
       FROM sessions s
       ${whereSql}
       ORDER BY s.work_completed ASC
@@ -623,6 +634,7 @@ router.post('/query', async (req, res) => {
       // Collect metadata
       const meta = {
         sessionId: sess.id,
+        qatrackInstanceId: sess.qatrack_instance_id || null,
         testList: sess.test_list_name,
         unit: sess.unit_name,
         date: sess.work_completed,
@@ -637,6 +649,7 @@ router.post('/query', async (req, res) => {
 
       const point = {
         sessionId: sess.id,
+        qatrackInstanceId: sess.qatrack_instance_id || null,
         x: xNum,
         xLabel,
         y: yNum,
@@ -685,6 +698,238 @@ router.post('/query', async (req, res) => {
     });
   } catch (err) {
     res.status(500).json({ error: err.message });
+  }
+});
+
+// Helpers for session details formatting and previous/following calculations
+function formatQATrackValue(val, formatSpec) {
+  if (val === null || val === undefined || isNaN(val)) return '';
+  if (!formatSpec || typeof formatSpec !== 'string') return String(val);
+  const spec = formatSpec.trim();
+  const floatMatch = spec.match(/%([0-9]*)\.?([0-9]+)?f/);
+  if (floatMatch) {
+    const decimals = floatMatch[2] !== undefined ? parseInt(floatMatch[2], 10) : 2;
+    return Number(val).toFixed(decimals);
+  }
+  const gMatch = spec.match(/%([0-9]*)\.?([0-9]+)?g/);
+  if (gMatch) {
+    const sigFigs = gMatch[2] !== undefined ? parseInt(gMatch[2], 10) : 4;
+    return Number(val).toPrecision(sigFigs);
+  }
+  if (spec.match(/%d|%i/)) {
+    return String(Math.round(Number(val)));
+  }
+  const expMatch = spec.match(/%([0-9]*)\.?([0-9]+)?e/);
+  if (expMatch) {
+    const decimals = expMatch[2] !== undefined ? parseInt(expMatch[2], 10) : 2;
+    return Number(val).toExponential(decimals);
+  }
+  return String(val);
+}
+
+function calculateDiffAndArrow(targetVal, currentVal) {
+  if (targetVal === null || targetVal === undefined || isNaN(targetVal) ||
+      currentVal === null || currentVal === undefined || isNaN(currentVal)) {
+    return { diffPercent: null, arrow: null };
+  }
+
+  const delta = targetVal - currentVal;
+  let arrow = '→';
+  if (delta > 0.000001) arrow = '↑';
+  else if (delta < -0.000001) arrow = '↓';
+
+  let diffPercent = null;
+  if (Math.abs(currentVal) > 0.000001) {
+    diffPercent = (delta / Math.abs(currentVal)) * 100;
+  } else if (Math.abs(targetVal) < 0.000001) {
+    diffPercent = 0;
+  }
+
+  return { diffPercent, arrow };
+}
+
+function sanitizeComments(raw) {
+  if (!raw) return '';
+  if (typeof raw === 'string') {
+    const trimmed = raw.trim();
+    if (trimmed.startsWith('[') || trimmed.startsWith('{')) {
+      try {
+        const parsed = JSON.parse(trimmed);
+        if (Array.isArray(parsed)) {
+          const texts = parsed.map(p => {
+            if (typeof p === 'string') {
+              if (p.startsWith('http://') || p.startsWith('https://') || p.startsWith('/api/')) return '';
+              return p.trim();
+            }
+            if (p && typeof p === 'object') {
+              return (p.comment || p.comment_text || p.text || '').trim();
+            }
+            return '';
+          }).filter(Boolean);
+          return texts.join('\n');
+        }
+      } catch (_) {}
+    }
+    if (trimmed.startsWith('http://') || trimmed.startsWith('https://') || trimmed.startsWith('/api/')) {
+      return '';
+    }
+    return trimmed;
+  }
+  return '';
+}
+
+// 8b. Session Details & Associated Test List Values (for Pop-up Splash)
+router.get(['/session-details/:id', '/sessions/:id/details'], (req, res) => {
+  try {
+    const sessionId = req.params.id;
+    const session = db.prepare(`
+      SELECT s.*, u.unit_class, u.unit_type, u.serial_number, u.location
+      FROM sessions s
+      LEFT JOIN units u ON s.unit_name = u.name
+      WHERE s.id = ? OR s.qatrack_instance_id = ?
+    `).get(sessionId, sessionId);
+
+    if (!session) {
+      return res.status(404).json({ success: false, error: 'Session not found' });
+    }
+
+    // Clean comments if legacy raw URL array was stored
+    session.comments = sanitizeComments(session.comments);
+
+    const testValuesRaw = db.prepare(`
+      SELECT tv.id, tv.session_id, tv.test_name, tv.test_slug, tv.value_string, tv.value_numeric,
+             tv.unit, tv.tolerance_min, tv.tolerance_max, tv.status, tv.pass_fail,
+             td.formatting
+      FROM test_values tv
+      LEFT JOIN test_definitions td ON tv.test_name = td.name
+      WHERE tv.session_id = ?
+      ORDER BY tv.test_name ASC
+    `).all(session.id);
+
+    const getPrevStmt = db.prepare(`
+      SELECT tv.value_string, tv.value_numeric, tv.unit, tv.status, tv.pass_fail, s.work_completed, s.id as session_id, td.formatting
+      FROM test_values tv
+      JOIN sessions s ON tv.session_id = s.id
+      LEFT JOIN test_definitions td ON tv.test_name = td.name
+      WHERE s.unit_name = ? AND tv.test_name = ?
+        AND (s.work_completed < ? OR (s.work_completed = ? AND s.id < ?))
+      ORDER BY s.work_completed DESC, s.id DESC
+      LIMIT 1
+    `);
+
+    const getNextStmt = db.prepare(`
+      SELECT tv.value_string, tv.value_numeric, tv.unit, tv.status, tv.pass_fail, s.work_completed, s.id as session_id, td.formatting
+      FROM test_values tv
+      JOIN sessions s ON tv.session_id = s.id
+      LEFT JOIN test_definitions td ON tv.test_name = td.name
+      WHERE s.unit_name = ? AND tv.test_name = ?
+        AND (s.work_completed > ? OR (s.work_completed = ? AND s.id > ?))
+      ORDER BY s.work_completed ASC, s.id ASC
+      LIMIT 1
+    `);
+
+    const enrichedTestValues = testValuesRaw.map(tv => {
+      // 1. Ensure value_string preserves exact formatting/precision from QATrack
+      let currentDisplay = tv.value_string;
+      if ((currentDisplay === null || currentDisplay === undefined || currentDisplay === '' || currentDisplay === String(tv.value_numeric)) &&
+          tv.formatting && tv.value_numeric !== null) {
+        currentDisplay = formatQATrackValue(tv.value_numeric, tv.formatting);
+      } else if (currentDisplay === null || currentDisplay === undefined) {
+        currentDisplay = tv.value_numeric !== null ? String(tv.value_numeric) : '';
+      }
+
+      // 2. Tolerance & Action level marking
+      const pFail = (tv.pass_fail || '').toLowerCase();
+      const st = (tv.status || '').toLowerCase();
+      let toleranceLevel = 'ok';
+      if (pFail.includes('action') || st.includes('action') || pFail.includes('fail') || st.includes('fail')) {
+        toleranceLevel = 'action';
+      } else if (pFail.includes('tolerance') || pFail.includes('tol') || st.includes('tolerance') || st.includes('tol') || st.includes('warn')) {
+        toleranceLevel = 'tolerance';
+      }
+
+      // 3. Review status (Approved, Unreviewed, etc.)
+      let reviewStatus = tv.status || 'Approved';
+      if (['ok', 'action', 'tolerance', 'tol', 'pass'].includes(reviewStatus.toLowerCase())) {
+        reviewStatus = session.status || 'Approved';
+      }
+
+      // 4. Fetch previous test reading for this machine
+      let previous = null;
+      try {
+        const prevRow = getPrevStmt.get(session.unit_name, tv.test_name, session.work_completed, session.work_completed, session.id);
+        if (prevRow) {
+          let prevDisplay = prevRow.value_string;
+          if ((!prevDisplay || prevDisplay === String(prevRow.value_numeric)) && prevRow.formatting && prevRow.value_numeric !== null) {
+            prevDisplay = formatQATrackValue(prevRow.value_numeric, prevRow.formatting);
+          } else if (prevDisplay === null || prevDisplay === undefined) {
+            prevDisplay = prevRow.value_numeric !== null ? String(prevRow.value_numeric) : '';
+          }
+          const { diffPercent, arrow } = calculateDiffAndArrow(prevRow.value_numeric, tv.value_numeric);
+          previous = {
+            value_string: prevDisplay,
+            value_numeric: prevRow.value_numeric,
+            diffPercent,
+            arrow,
+            date: prevRow.work_completed,
+            sessionId: prevRow.session_id
+          };
+        }
+      } catch (_) {}
+
+      // 5. Fetch following test reading for this machine
+      let following = null;
+      try {
+        const nextRow = getNextStmt.get(session.unit_name, tv.test_name, session.work_completed, session.work_completed, session.id);
+        if (nextRow) {
+          let nextDisplay = nextRow.value_string;
+          if ((!nextDisplay || nextDisplay === String(nextRow.value_numeric)) && nextRow.formatting && nextRow.value_numeric !== null) {
+            nextDisplay = formatQATrackValue(nextRow.value_numeric, nextRow.formatting);
+          } else if (nextDisplay === null || nextDisplay === undefined) {
+            nextDisplay = nextRow.value_numeric !== null ? String(nextRow.value_numeric) : '';
+          }
+          const { diffPercent, arrow } = calculateDiffAndArrow(nextRow.value_numeric, tv.value_numeric);
+          following = {
+            value_string: nextDisplay,
+            value_numeric: nextRow.value_numeric,
+            diffPercent,
+            arrow,
+            date: nextRow.work_completed,
+            sessionId: nextRow.session_id
+          };
+        }
+      } catch (_) {}
+
+      return {
+        id: tv.id,
+        test_name: tv.test_name,
+        test_slug: tv.test_slug,
+        value_string: currentDisplay,
+        value_numeric: tv.value_numeric,
+        unit: tv.unit,
+        tolerance_min: tv.tolerance_min,
+        tolerance_max: tv.tolerance_max,
+        toleranceLevel,
+        reviewStatus,
+        previous,
+        following
+      };
+    });
+
+    const qatrackConfig = qatrackClient.getConfig();
+    const baseUrl = (qatrackConfig.baseUrl || '').replace(/\/+$/, '');
+    const qatrackWebUrl = session.qatrack_instance_id && baseUrl
+      ? `${baseUrl}/qa/session/details/${session.qatrack_instance_id}/`
+      : null;
+
+    res.json({
+      success: true,
+      session,
+      testValues: enrichedTestValues,
+      qatrackWebUrl
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
   }
 });
 

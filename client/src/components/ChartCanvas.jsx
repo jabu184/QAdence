@@ -13,7 +13,7 @@ import {
   Filler
 } from 'chart.js';
 import { Scatter, Line, Bar } from 'react-chartjs-2';
-import { Download, EyeOff, RotateCcw, AlertCircle, Activity, RefreshCw, Target } from 'lucide-react';
+import { Download, EyeOff, RotateCcw, AlertCircle, Activity, RefreshCw, Target, FilterX, ListChecks } from 'lucide-react';
 import {
   computeLinearRegression,
   computeMovingAverage,
@@ -47,6 +47,8 @@ export default function ChartCanvas({
   ignoredSessionIds = [],
   onIgnorePoint,
   onRestoreAllIgnored,
+  onRemoveOutliers,
+  onInspectSession,
   hasLoaded = true,
   onRetrieveData
 }) {
@@ -130,13 +132,18 @@ export default function ChartCanvas({
 
         const topPixel = yScale.getPixelForValue(topVal);
         const bottomPixel = yScale.getPixelForValue(bottomVal);
+        if (isNaN(topPixel) || isNaN(bottomPixel)) return;
 
         const y = Math.min(topPixel, bottomPixel);
         const height = Math.abs(bottomPixel - topPixel);
+        const width = chartArea.width || (chartArea.right - chartArea.left);
 
         ctx.save();
-        ctx.fillStyle = 'rgba(16, 185, 129, 0.10)'; // green shaded area if < tolerance level
-        ctx.fillRect(chartArea.left, y, chartArea.right - chartArea.left, height);
+        ctx.beginPath();
+        ctx.rect(chartArea.left, chartArea.top, width, chartArea.height || (chartArea.bottom - chartArea.top));
+        ctx.clip();
+        ctx.fillStyle = 'rgba(34, 197, 94, 0.18)'; // Vivid green shaded area matching box & whisker
+        ctx.fillRect(chartArea.left, y, width, height);
         ctx.restore();
       }
     };
@@ -159,17 +166,38 @@ export default function ChartCanvas({
 
         const leftPixel = xScale.getPixelForValue(leftVal);
         const rightPixel = xScale.getPixelForValue(rightVal);
+        if (isNaN(leftPixel) || isNaN(rightPixel)) return;
 
         const x = Math.min(leftPixel, rightPixel);
         const width = Math.abs(rightPixel - leftPixel);
+        const height = chartArea.height || (chartArea.bottom - chartArea.top);
 
         ctx.save();
-        ctx.fillStyle = 'rgba(16, 185, 129, 0.10)'; // green shaded area if < tolerance level
-        ctx.fillRect(x, chartArea.top, width, chartArea.bottom - chartArea.top);
+        ctx.beginPath();
+        ctx.rect(chartArea.left, chartArea.top, chartArea.width || (chartArea.right - chartArea.left), height);
+        ctx.clip();
+        ctx.fillStyle = 'rgba(34, 197, 94, 0.18)'; // Vivid green shaded area
+        ctx.fillRect(x, chartArea.top, width, height);
         ctx.restore();
       }
     };
   }, [baselineInfo]);
+
+  const handleChartClick = (e) => {
+    if (e.button !== 0) return;
+    const chart = chartRef.current;
+    if (!chart) return;
+    const nativeEvent = e.nativeEvent || e;
+    const elements = chart.getElementsAtEventForMode(nativeEvent, 'nearest', { intersect: true }, false);
+    if (elements && elements.length > 0) {
+      const { datasetIndex, index } = elements[0];
+      const dataset = chart.data?.datasets?.[datasetIndex];
+      const pt = dataset?.data?.[index];
+      if (pt && pt.pointMeta?.sessionId) {
+        onInspectSession && onInspectSession(pt.pointMeta.sessionId);
+      }
+    }
+  };
 
   const handleContextMenu = (e) => {
     e.preventDefault();
@@ -601,7 +629,18 @@ export default function ChartCanvas({
     const options = {
       responsive: true,
       maintainAspectRatio: false,
+      onClick: (event, elements) => {
+        if (elements && elements.length > 0) {
+          const { datasetIndex, index } = elements[0];
+          const dataset = chartDatasets[datasetIndex];
+          const pt = dataset?.data?.[index];
+          if (pt?.pointMeta?.sessionId) {
+            onInspectSession && onInspectSession(pt.pointMeta.sessionId);
+          }
+        }
+      },
       plugins: {
+        horizontalToleranceBand: { display: true },
         legend: { position: 'top' },
         tooltip: {
           callbacks: {
@@ -626,7 +665,10 @@ export default function ChartCanvas({
               const yVal = item.raw.y;
               return `${isDateX ? 'Date' : xVariable}: ${xVal} | ${yVariable}: ${yVal}`;
             },
-            afterLabel: () => '💡 Right-click to ignore this point'
+            afterLabel: () => [
+              '💡 Click to view session details & test list',
+              '💡 Right-click to ignore this point'
+            ]
           }
         }
       },
@@ -782,28 +824,57 @@ export default function ChartCanvas({
             </p>
           </div>
 
-          <button
-            onClick={handleDownloadPng}
-            style={{
-              display: 'flex',
-              alignItems: 'center',
-              gap: '6px',
-              padding: '0.4rem 0.8rem',
-              borderRadius: '6px',
-              border: '1px solid #cbd5e1',
-              background: '#ffffff',
-              fontSize: '0.8rem',
-              fontWeight: '500',
-              color: '#334155'
-            }}
-          >
-            <Download size={14} /> Export PNG
-          </button>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+            {onRemoveOutliers && (
+              <button
+                type="button"
+                onClick={onRemoveOutliers}
+                title="Automatically identify and exclude statistical outliers (1.5 × IQR) from current datasets"
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '6px',
+                  padding: '0.4rem 0.8rem',
+                  borderRadius: '6px',
+                  border: '1px solid #fed7aa',
+                  background: '#fff7ed',
+                  fontSize: '0.8rem',
+                  fontWeight: '600',
+                  color: '#c2410c',
+                  cursor: 'pointer',
+                  transition: 'background 0.15s ease'
+                }}
+              >
+                <FilterX size={14} /> Remove Outliers
+              </button>
+            )}
+
+            <button
+              onClick={handleDownloadPng}
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: '6px',
+                padding: '0.4rem 0.8rem',
+                borderRadius: '6px',
+                border: '1px solid #cbd5e1',
+                background: '#ffffff',
+                fontSize: '0.8rem',
+                fontWeight: '500',
+                color: '#334155',
+                cursor: 'pointer'
+              }}
+            >
+              <Download size={14} /> Export PNG
+            </button>
+          </div>
         </div>
 
         <div
           onContextMenu={handleContextMenu}
-          style={{ height: '440px', width: '100%', position: 'relative' }}
+          onClick={handleChartClick}
+          style={{ height: '440px', width: '100%', position: 'relative', cursor: 'pointer' }}
+          title="Click any point to view session details; Right-click to ignore"
         >
           {chartComponent}
         </div>
@@ -1095,6 +1166,32 @@ export default function ChartCanvas({
               {yVariable}: <strong>{contextMenu.point.y}</strong>
             </div>
           </div>
+          <button
+            onClick={() => {
+              if (onInspectSession) onInspectSession(contextMenu.point.sessionId);
+              setContextMenu({ visible: false, x: 0, y: 0, point: null });
+            }}
+            style={{
+              width: '100%',
+              textAlign: 'left',
+              padding: '8px 10px',
+              fontSize: '0.82rem',
+              fontWeight: '600',
+              color: '#2563eb',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '6px',
+              borderRadius: '4px',
+              marginTop: '2px',
+              border: 'none',
+              background: 'transparent',
+              cursor: 'pointer'
+            }}
+            onMouseEnter={(e) => e.currentTarget.style.background = '#eff6ff'}
+            onMouseLeave={(e) => e.currentTarget.style.background = 'transparent'}
+          >
+            <ListChecks size={14} /> View Session Details & Tests
+          </button>
           <button
             onClick={() => {
               if (onIgnorePoint) onIgnorePoint(contextMenu.point.sessionId);

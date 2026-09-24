@@ -8,6 +8,8 @@ class QATrackClient {
     this.httpAgent = new http.Agent({ keepAlive: true, keepAliveMsecs: 30000, timeout: 120000 });
     this.httpsAgent = new https.Agent({ keepAlive: true, keepAliveMsecs: 30000, timeout: 120000 });
     this.cachedMetadata = null;
+    this.userMap = new Map();
+    this.commentMap = new Map();
     this.reloadConfig();
     this.syncStatus = {
       isRunning: false,
@@ -324,6 +326,18 @@ class QATrackClient {
       resolvedUnitsUrl = unitsEndpoints.units;
     }
 
+    // Determine Auth / Users root
+    let usersUrl = rootData.users || `${this.baseUrl}/api/auth/users/`;
+    if (rootData.auth) {
+      try {
+        const authRes = await axios.get(rootData.auth, { headers: this.getHeaders(), timeout: 8000 });
+        const authEndpoints = authRes.data || {};
+        if (authEndpoints.users) {
+          usersUrl = authEndpoints.users;
+        }
+      } catch (_) {}
+    }
+
     return {
       unitsUrl: resolvedUnitsUrl,
       unitClassesUrl: unitsEndpoints.unitclasses || `${this.baseUrl}/api/units/unitclasses/`,
@@ -334,7 +348,9 @@ class QATrackClient {
       unitTestInfosUrl: qcEndpoints.unittestinfos || qcEndpoints['unit-test-infos'] || `${this.baseUrl}/api/qc/unittestinfos/`,
       unitTestCollectionsUrl: qcEndpoints.unittestcollections || qcEndpoints['unit-test-collections'] || `${this.baseUrl}/api/qc/unittestcollections/`,
       testListInstancesUrl: qcEndpoints.testlistinstances || qcEndpoints['test-list-instances'] || `${this.baseUrl}/api/qc/testlistinstances/`,
-      testInstanceStatusesUrl: qcEndpoints.testinstancestatus || qcEndpoints['test-instance-status'] || qcEndpoints.statuses || `${this.baseUrl}/api/qc/testinstancestatus/`
+      testInstanceStatusesUrl: qcEndpoints.testinstancestatus || qcEndpoints['test-instance-status'] || qcEndpoints.statuses || `${this.baseUrl}/api/qc/testinstancestatus/`,
+      usersUrl: usersUrl,
+      commentsUrl: qcEndpoints.comments || qcEndpoints.qacomments || qcEndpoints['qa-comments'] || `${this.baseUrl}/api/qc/comments/`
     };
   }
 
@@ -418,6 +434,66 @@ class QATrackClient {
       if (name) testInstanceStatusMap.set(name.toLowerCase().trim(), statusObj);
       if (slug) testInstanceStatusMap.set(slug.toLowerCase().trim(), statusObj);
     }
+
+    // 0a. Fetch Users for operator resolution
+    this.syncStatus.stage = 'Fetching Users / Operators...';
+    this.updateMemoryStats();
+    let users = [];
+    try {
+      if (endpoints.usersUrl) {
+        users = await this.fetchAllPages(endpoints.usersUrl);
+      }
+    } catch (e) {
+      try {
+        users = await this.fetchAllPages(`${this.baseUrl}/api/users/`);
+      } catch (_) {}
+    }
+    const userMap = new Map();
+    for (const u of users) {
+      const id = u.id || this.extractIdFromUrl(u.url);
+      const fullName = [u.first_name, u.last_name].filter(Boolean).join(' ').trim();
+      const displayName = fullName || u.username || u.name || (id ? `User #${id}` : 'User');
+      if (id) {
+        userMap.set(id, displayName);
+        userMap.set(String(id), displayName);
+      }
+      if (u.url) {
+        userMap.set(u.url, displayName);
+        userMap.set(u.url.replace(/\/$/, ''), displayName);
+        const relUrl = u.url.replace(/^https?:\/\/[^\/]+/, '');
+        userMap.set(relUrl, displayName);
+        userMap.set(relUrl.replace(/\/$/, ''), displayName);
+      }
+      if (u.username) {
+        userMap.set(u.username, displayName);
+      }
+    }
+    this.userMap = userMap;
+
+    // 0b. Fetch Comments for clean comment resolution
+    let comments = [];
+    try {
+      if (endpoints.commentsUrl) {
+        comments = await this.fetchAllPages(endpoints.commentsUrl);
+      }
+    } catch (_) {}
+    const commentMap = new Map();
+    for (const c of comments) {
+      const id = c.id || this.extractIdFromUrl(c.url);
+      const commentText = c.comment || c.comment_text || c.text || '';
+      if (id) {
+        commentMap.set(id, commentText);
+        commentMap.set(String(id), commentText);
+      }
+      if (c.url) {
+        commentMap.set(c.url, commentText);
+        commentMap.set(c.url.replace(/\/$/, ''), commentText);
+        const relUrl = c.url.replace(/^https?:\/\/[^\/]+/, '');
+        commentMap.set(relUrl, commentText);
+        commentMap.set(relUrl.replace(/\/$/, ''), commentText);
+      }
+    }
+    this.commentMap = commentMap;
 
     // 1. Fetch Unit Classes & Unit Types
     this.syncStatus.stage = 'Fetching Unit Classes & Types...';
@@ -824,8 +900,8 @@ class QATrackClient {
 
     // Populate test_definitions in database ONLY from active collections
     const insertTestDef = db.prepare(`
-      INSERT OR REPLACE INTO test_definitions (name, slug, test_list_name, unit, data_type, is_numeric)
-      VALUES (?, ?, ?, ?, ?, ?)
+      INSERT OR REPLACE INTO test_definitions (name, slug, test_list_name, unit, data_type, is_numeric, formatting)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
     `);
 
     // Populate only from ACTIVE unit test collections
@@ -843,7 +919,7 @@ class QATrackClient {
         for (const tRef of allTests) {
           const t = testDefMap.get(tRef) || (typeof tRef === 'string' && testDefMap.get(this.extractIdFromUrl(tRef)));
           if (t && t.name) {
-            insertTestDef.run(t.name, t.slug, testListName, t.unit || '', t.type, this.isNumericType(t));
+            insertTestDef.run(t.name, t.slug, testListName, t.unit || '', t.type, this.isNumericType(t), t.formatting || '');
           }
         }
       }
@@ -852,8 +928,8 @@ class QATrackClient {
         for (const utiRef of c.tests) {
           const uti = utiMap.get(utiRef) || (typeof utiRef === 'string' && utiMap.get(this.extractIdFromUrl(utiRef)));
           if (uti && uti.testName) {
-            const tDef = testDefMap.get(uti.testId) || { type: uti.type, unit: uti.unit, name: uti.testName, slug: uti.testSlug };
-            insertTestDef.run(uti.testName, uti.testSlug, testListName, uti.unit || '', uti.type, this.isNumericType(tDef));
+            const tDef = testDefMap.get(uti.testId) || { type: uti.type, unit: uti.unit, name: uti.testName, slug: uti.testSlug, formatting: uti.formatting };
+            insertTestDef.run(uti.testName, uti.testSlug, testListName, uti.unit || '', uti.type, this.isNumericType(tDef), uti.formatting || tDef.formatting || '');
           }
         }
       }
@@ -869,7 +945,7 @@ class QATrackClient {
           (typeof tRef === 'string' && (testDefMap.get(this.extractIdFromUrl(tRef)) || testDefMap.get(tRef.replace(/\/$/, ''))));
         if (t && t.name) {
           try {
-            insertTestDef.run(t.name, t.slug, tl.name, t.unit || '', t.type, this.isNumericType(t));
+            insertTestDef.run(t.name, t.slug, tl.name, t.unit || '', t.type, this.isNumericType(t), t.formatting || '');
           } catch (_) {}
         }
       }
@@ -1101,7 +1177,7 @@ class QATrackClient {
   }
 
   resolveTestInstanceInfo(ti, utiMap, testDefMap = null) {
-    if (!ti) return { testName: 'Test', testSlug: '', unit: '', isNumeric: false };
+    if (!ti) return { testName: 'Test', testSlug: '', unit: '', isNumeric: false, formatting: '' };
 
     let utiInfo = null;
     if (ti.unit_test_info) {
@@ -1117,6 +1193,7 @@ class QATrackClient {
     let testSlug = utiInfo?.testSlug || ti.slug || ti.test_slug || '';
     let unit = utiInfo?.unit || ti.unit || '';
     let isNumeric = utiInfo?.isNumeric ?? false;
+    let formatting = utiInfo?.formatting || '';
 
     // 1. Try unit_test_infos table in SQLite if ti.unit_test_info exists
     if (!testName && ti.unit_test_info) {
@@ -1146,6 +1223,7 @@ class QATrackClient {
           testSlug = tDef.slug || testSlug;
           unit = tDef.unit || unit;
           isNumeric = this.isNumericType(tDef);
+          formatting = tDef.formatting || formatting;
         }
       }
     }
@@ -1156,12 +1234,13 @@ class QATrackClient {
       const tId = typeof tRef === 'number' ? tRef : (tRef ? this.extractIdFromUrl(tRef) : null);
       if (tId) {
         try {
-          const dbDef = db.prepare('SELECT name, slug, unit, is_numeric FROM test_definitions WHERE slug = ? OR name = ? OR id = ?').get(String(tId), String(tId), tId);
+          const dbDef = db.prepare('SELECT name, slug, unit, is_numeric, formatting FROM test_definitions WHERE slug = ? OR name = ? OR id = ?').get(String(tId), String(tId), tId);
           if (dbDef) {
             testName = dbDef.name;
             testSlug = dbDef.slug || testSlug;
             unit = dbDef.unit || unit;
             isNumeric = dbDef.is_numeric === 1;
+            formatting = dbDef.formatting || formatting;
           }
         } catch (_) {}
 
@@ -1183,41 +1262,83 @@ class QATrackClient {
       testName = 'Test';
     }
 
-    return { testName, testSlug, unit, isNumeric };
+    return { testName, testSlug, unit, isNumeric, formatting };
   }
 
-  extractTestInstanceValue(ti) {
+  formatWithQATrackSpec(val, formatSpec) {
+    if (val === null || val === undefined || isNaN(val)) return '';
+    if (!formatSpec || typeof formatSpec !== 'string') return String(val);
+    const spec = formatSpec.trim();
+
+    // %.2f, %.3f, etc.
+    const floatMatch = spec.match(/%([0-9]*)\.?([0-9]+)?f/);
+    if (floatMatch) {
+      const decimals = floatMatch[2] !== undefined ? parseInt(floatMatch[2], 10) : 2;
+      return Number(val).toFixed(decimals);
+    }
+
+    // %.2g, %.3g, etc. (significant figures)
+    const gMatch = spec.match(/%([0-9]*)\.?([0-9]+)?g/);
+    if (gMatch) {
+      const sigFigs = gMatch[2] !== undefined ? parseInt(gMatch[2], 10) : 4;
+      return Number(val).toPrecision(sigFigs);
+    }
+
+    // %d or %i (integer)
+    if (spec.match(/%d|%i/)) {
+      return String(Math.round(Number(val)));
+    }
+
+    // %.2e, %.3e (exponential)
+    const expMatch = spec.match(/%([0-9]*)\.?([0-9]+)?e/);
+    if (expMatch) {
+      const decimals = expMatch[2] !== undefined ? parseInt(expMatch[2], 10) : 2;
+      return Number(val).toExponential(decimals);
+    }
+
+    return String(val);
+  }
+
+  extractTestInstanceValue(ti, formatting = null) {
     let numVal = null;
     let strVal = '';
 
-    // 1. Direct number on ti.value
+    // 1. String value directly from QATrack+ (preserves exact significant figures and decimal places)
+    if (ti.string_value !== undefined && ti.string_value !== null && String(ti.string_value).trim() !== '') {
+      strVal = String(ti.string_value).trim();
+      const cleanStr = strVal.replace(/%/g, '').replace(/,/g, '').trim();
+      const numMatch = cleanStr.match(/^[-+]?[0-9]*\.?[0-9]+([eE][-+]?[0-9]+)?/);
+      if (numMatch) {
+        const parsed = parseFloat(numMatch[0]);
+        if (!isNaN(parsed)) numVal = parsed;
+      }
+    }
+
+    // 2. Direct number on ti.value
     if (typeof ti.value === 'number') {
-      numVal = ti.value;
-      strVal = String(ti.value);
+      if (numVal === null) numVal = ti.value;
+      if (!strVal) {
+        strVal = formatting ? this.formatWithQATrackSpec(ti.value, formatting) : String(ti.value);
+      }
     } else if (ti.value !== null && ti.value !== undefined && ti.value !== '') {
       const clean = String(ti.value).trim().replace(/%/g, '').replace(/,/g, '');
       const parsed = parseFloat(clean);
-      if (!isNaN(parsed)) numVal = parsed;
-      strVal = String(ti.value);
+      if (!isNaN(parsed)) {
+        if (numVal === null) numVal = parsed;
+        if (!strVal) {
+          strVal = formatting ? this.formatWithQATrackSpec(parsed, formatting) : String(ti.value);
+        }
+      } else if (!strVal) {
+        strVal = String(ti.value);
+      }
     }
 
-    // 2. String value (very common for QATrack+ calculation & composite tests)
-    if (ti.string_value !== undefined && ti.string_value !== null && String(ti.string_value).trim() !== '') {
-      strVal = String(ti.string_value).trim();
-      if (numVal === null) {
-        // Handle percentages (e.g. "98.5%"), units attached (e.g. "0.473 mm", "25.04 cGy"), comma decimals
-        const cleanStr = strVal.replace(/%/g, '').replace(/,/g, '').trim();
-        const numMatch = cleanStr.match(/^[-+]?[0-9]*\.?[0-9]+([eE][-+]?[0-9]+)?/);
-        if (numMatch) {
-          const parsed = parseFloat(numMatch[0]);
-          if (!isNaN(parsed)) numVal = parsed;
-        }
-      }
-    } else if (ti.date_value) {
+    // 3. Date value
+    if (!strVal && ti.date_value) {
       strVal = ti.date_value;
     }
 
-    // 3. JSON value (calculation tests that return JSON objects or numbers)
+    // 4. JSON value (calculation tests that return JSON objects or numbers)
     if (ti.json_value !== undefined && ti.json_value !== null && ti.json_value !== '') {
       let jVal = ti.json_value;
       if (typeof jVal === 'string') {
@@ -1225,12 +1346,12 @@ class QATrackClient {
       }
       if (typeof jVal === 'number') {
         if (numVal === null) numVal = jVal;
-        if (!strVal) strVal = String(jVal);
+        if (!strVal) strVal = formatting ? this.formatWithQATrackSpec(jVal, formatting) : String(jVal);
       } else if (typeof jVal === 'object' && jVal !== null) {
         const candidate = jVal.value ?? jVal.val ?? jVal.result ?? jVal.reading ?? (Array.isArray(jVal) ? jVal[0] : null);
         if (typeof candidate === 'number') {
           if (numVal === null) numVal = candidate;
-          if (!strVal) strVal = String(candidate);
+          if (!strVal) strVal = formatting ? this.formatWithQATrackSpec(candidate, formatting) : String(candidate);
         } else if (typeof candidate === 'string') {
           if (!strVal) strVal = candidate;
           if (numVal === null) {
@@ -1241,7 +1362,118 @@ class QATrackClient {
       }
     }
 
+    // Format with QATrack formatting if missing decimal precision
+    if (formatting && numVal !== null && strVal && !isNaN(Number(strVal)) && !strVal.includes('.')) {
+      const formatted = this.formatWithQATrackSpec(numVal, formatting);
+      if (formatted) strVal = formatted;
+    }
+
     return { numVal, strVal };
+  }
+
+  resolveUserName(userRef, inst = null) {
+    if (!userRef && !inst) return 'Unknown';
+
+    // 1. Direct name on instance
+    if (inst && typeof inst.created_by_name === 'string' && inst.created_by_name.trim()) {
+      return inst.created_by_name.trim();
+    }
+
+    // 2. Nested object on userRef or instance
+    const targetObj = (typeof userRef === 'object' && userRef !== null) ? userRef : (inst && typeof inst.created_by === 'object' ? inst.created_by : null);
+    if (targetObj) {
+      const fullName = [targetObj.first_name, targetObj.last_name].filter(Boolean).join(' ').trim();
+      if (fullName) return fullName;
+      if (targetObj.username) return targetObj.username;
+      if (targetObj.name) return targetObj.name;
+    }
+
+    // 3. User map lookup
+    if (this.userMap) {
+      if (typeof userRef === 'number' || typeof userRef === 'string') {
+        const key = String(userRef).trim();
+        if (this.userMap.has(key)) return this.userMap.get(key);
+        const noSlash = key.replace(/\/$/, '');
+        if (this.userMap.has(noSlash)) return this.userMap.get(noSlash);
+        const rel = key.replace(/^https?:\/\/[^\/]+/, '');
+        if (this.userMap.has(rel)) return this.userMap.get(rel);
+        if (this.userMap.has(rel.replace(/\/$/, ''))) return this.userMap.get(rel.replace(/\/$/, ''));
+      }
+      const id = this.extractIdFromUrl(userRef);
+      if (id && this.userMap.has(id)) return this.userMap.get(id);
+      if (id && this.userMap.has(String(id))) return this.userMap.get(String(id));
+    }
+
+    // 4. Plain text name (not a URL)
+    if (typeof userRef === 'string') {
+      const trimmed = userRef.trim();
+      if (!trimmed.includes('/') && !trimmed.startsWith('http')) {
+        return trimmed;
+      }
+      const id = this.extractIdFromUrl(trimmed);
+      if (id) return `User #${id}`;
+    }
+
+    return (inst && inst.created_by_name) || (typeof userRef === 'string' && !userRef.includes('/') ? userRef : 'User');
+  }
+
+  resolveCommentsSync(inst) {
+    if (!inst) return '';
+
+    // Plain text comment on inst.comment
+    if (typeof inst.comment === 'string' && inst.comment.trim() && !inst.comment.startsWith('http://') && !inst.comment.startsWith('https://')) {
+      return inst.comment.trim();
+    }
+
+    const rawComments = inst.comments;
+    if (!rawComments) return '';
+
+    if (typeof rawComments === 'string') {
+      const trimmed = rawComments.trim();
+      // If already a clean string and not JSON array of URLs
+      if (!trimmed.startsWith('[') && !trimmed.startsWith('http://') && !trimmed.startsWith('https://')) {
+        return trimmed;
+      }
+      // If it looks like a JSON array
+      if (trimmed.startsWith('[')) {
+        try {
+          const parsed = JSON.parse(trimmed);
+          return this.resolveCommentsSync({ comments: parsed });
+        } catch (_) {}
+      }
+    }
+
+    const commentList = Array.isArray(rawComments) ? rawComments : [rawComments];
+    const resolvedTexts = [];
+
+    for (const c of commentList) {
+      if (!c) continue;
+      if (typeof c === 'object') {
+        const text = c.comment || c.comment_text || c.text || '';
+        if (text && typeof text === 'string') resolvedTexts.push(text.trim());
+        continue;
+      }
+      if (typeof c === 'string') {
+        const trimmed = c.trim();
+        // If it's a URL, check this.commentMap
+        if (trimmed.startsWith('http://') || trimmed.startsWith('https://') || trimmed.startsWith('/api/')) {
+          if (this.commentMap) {
+            const found = this.commentMap.get(trimmed) ||
+              this.commentMap.get(trimmed.replace(/\/$/, '')) ||
+              this.commentMap.get(this.extractIdFromUrl(trimmed));
+            if (found && typeof found === 'string') {
+              resolvedTexts.push(found.trim());
+            }
+          }
+          // Do NOT keep raw URL!
+          continue;
+        }
+        // If not a URL, keep it!
+        resolvedTexts.push(trimmed);
+      }
+    }
+
+    return resolvedTexts.filter(Boolean).join('\n');
   }
 
   async syncMetadata(options = {}) {
@@ -1405,8 +1637,8 @@ class QATrackClient {
       const getSessionByQATrackId = db.prepare('SELECT id FROM sessions WHERE qatrack_instance_id = ?');
       const deleteOldValues = db.prepare('DELETE FROM test_values WHERE session_id = ?');
       const insertTestVal = db.prepare(`
-        INSERT INTO test_values (session_id, test_name, test_slug, value_string, value_numeric, unit, tolerance_min, tolerance_max, status)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO test_values (session_id, test_name, test_slug, value_string, value_numeric, unit, tolerance_min, tolerance_max, status, pass_fail)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `);
 
       const fetchedQATrackIds = new Set();
@@ -1577,9 +1809,8 @@ class QATrackClient {
           if (dateFrom && dateStr.substring(0, 10) < dateFrom) continue;
           if (dateTo && dateStr.substring(0, 10) > dateTo) continue;
 
-          const createdBy = (typeof inst.created_by === 'string' && inst.created_by.includes('/'))
-            ? 'Physicist'
-            : (inst.created_by_name || (typeof inst.created_by === 'object' ? inst.created_by.username : inst.created_by) || 'User');
+          const createdBy = this.resolveUserName(inst.created_by, inst);
+          const cleanComments = this.resolveCommentsSync(inst);
 
           insertSession.run(
             qatrackId,
@@ -1589,7 +1820,7 @@ class QATrackClient {
             dateStr,
             createdBy,
             sessionStatus,
-            inst.comments && inst.comments.length > 0 ? JSON.stringify(inst.comments) : ''
+            cleanComments
           );
 
           const sess = getSessionByQATrackId.get(qatrackId);
@@ -1605,7 +1836,10 @@ class QATrackClient {
               }
 
               const tiInfo = this.resolveTestInstanceInfo(ti, utiMap, testDefMap);
-              const { numVal, strVal } = this.extractTestInstanceValue(ti);
+              const { numVal, strVal } = this.extractTestInstanceValue(ti, tiInfo.formatting);
+
+              const reviewStatus = tiStatusInfo.isRejected ? 'Rejected' : (tiStatusInfo.requiresReview ? 'Unreviewed' : 'Approved');
+              const passFail = (ti.pass_fail || (tiStatusInfo.isRejected ? 'action' : 'ok')).toLowerCase();
 
               insertTestVal.run(
                 sess.id,
@@ -1616,7 +1850,8 @@ class QATrackClient {
                 tiInfo.unit,
                 null,
                 null,
-                tiStatusInfo.isRejected ? 'Rejected' : (tiStatusInfo.requiresReview ? 'Unreviewed' : (ti.pass_fail || 'OK'))
+                reviewStatus,
+                passFail
               );
               validTiCount++;
             }
@@ -2007,8 +2242,8 @@ class QATrackClient {
       const getSessionByQATrackId = db.prepare('SELECT id FROM sessions WHERE qatrack_instance_id = ?');
       const deleteOldValues = db.prepare('DELETE FROM test_values WHERE session_id = ?');
       const insertTestVal = db.prepare(`
-        INSERT INTO test_values (session_id, test_name, test_slug, value_string, value_numeric, unit, tolerance_min, tolerance_max, status)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO test_values (session_id, test_name, test_slug, value_string, value_numeric, unit, tolerance_min, tolerance_max, status, pass_fail)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `);
 
       const fetchedQATrackIds = new Set();
@@ -2118,9 +2353,8 @@ class QATrackClient {
             .replace('T', ' ')
             .substring(0, 19);
 
-          const createdBy = (typeof inst.created_by === 'string' && inst.created_by.includes('/'))
-            ? 'Physicist'
-            : (inst.created_by_name || (typeof inst.created_by === 'object' ? inst.created_by.username : inst.created_by) || 'User');
+          const createdBy = this.resolveUserName(inst.created_by, inst);
+          const cleanComments = this.resolveCommentsSync(inst);
 
           insertSession.run(
             qatrackId,
@@ -2130,7 +2364,7 @@ class QATrackClient {
             dateStr,
             createdBy,
             sessionStatus,
-            inst.comments && inst.comments.length > 0 ? JSON.stringify(inst.comments) : ''
+            cleanComments
           );
 
           const sess = getSessionByQATrackId.get(qatrackId);
@@ -2146,7 +2380,10 @@ class QATrackClient {
               }
 
               const tiInfo = this.resolveTestInstanceInfo(ti, utiMap, testDefMap);
-              const { numVal, strVal } = this.extractTestInstanceValue(ti);
+              const { numVal, strVal } = this.extractTestInstanceValue(ti, tiInfo.formatting);
+
+              const reviewStatus = tiStatusInfo.isRejected ? 'Rejected' : (tiStatusInfo.requiresReview ? 'Unreviewed' : 'Approved');
+              const passFail = (ti.pass_fail || (tiStatusInfo.isRejected ? 'action' : 'ok')).toLowerCase();
 
               insertTestVal.run(
                 sess.id,
@@ -2157,7 +2394,8 @@ class QATrackClient {
                 tiInfo.unit,
                 null,
                 null,
-                tiStatusInfo.isRejected ? 'Rejected' : (tiStatusInfo.requiresReview ? 'Unreviewed' : (ti.pass_fail || 'OK'))
+                reviewStatus,
+                passFail
               );
               validTiCount++;
             }

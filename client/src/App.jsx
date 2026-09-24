@@ -8,8 +8,9 @@ import SettingsModal from './components/SettingsModal';
 import SavePresetModal from './components/SavePresetModal';
 import PresetManagerModal from './components/PresetManagerModal';
 import SyncProgressModal from './components/SyncProgressModal';
+import SessionDetailsModal from './components/SessionDetailsModal';
 import { BarChart3, Table as TableIcon, RefreshCw } from 'lucide-react';
-import { calculateStats, computeLinearRegression } from './utils/math';
+import { calculateStats, computeLinearRegression, identifyOutlierSessionIds } from './utils/math';
 
 const DEFAULT_PALETTE = [
   '#2563eb', // Blue
@@ -88,6 +89,7 @@ export default function App() {
   const [isSavePresetOpen, setIsSavePresetOpen] = useState(false);
   const [isPresetManagerOpen, setIsPresetManagerOpen] = useState(false);
   const [isSyncModalOpen, setIsSyncModalOpen] = useState(false);
+  const [inspectedSessionId, setInspectedSessionId] = useState(null);
   const [syncStatus, setSyncStatus] = useState({
     isRunning: false,
     isCancelled: false,
@@ -991,6 +993,19 @@ export default function App() {
     setIgnoredSessionIds([]);
   };
 
+  const handleRemoveOutliers = () => {
+    const outlierIds = identifyOutlierSessionIds(datasets, datasetResults, ignoredSessionIds);
+    if (!outlierIds || outlierIds.length === 0) {
+      alert('No statistical outliers (1.5 × IQR) detected in the current data sets.');
+      return;
+    }
+    setIgnoredSessionIds(prev => {
+      const set = new Set(prev);
+      outlierIds.forEach(id => set.add(id));
+      return Array.from(set);
+    });
+  };
+
   // Aggregated table rows for DataTable
   const combinedTableRows = useMemo(() => {
     const rows = [];
@@ -1136,6 +1151,8 @@ export default function App() {
               ignoredSessionIds={ignoredSessionIds}
               onIgnorePoint={handleIgnorePoint}
               onRestoreAllIgnored={handleRestoreAllIgnored}
+              onRemoveOutliers={handleRemoveOutliers}
+              onInspectSession={setInspectedSessionId}
               hasLoaded={hasLoaded}
               onRetrieveData={handleRunLocalQuery}
               onRunLocalQuery={handleRunLocalQuery}
@@ -1151,6 +1168,7 @@ export default function App() {
               xVariable={xVariable}
               trendlineConfig={trendlineConfig}
               baselineConfig={baselineConfig}
+              onInspectSession={setInspectedSessionId}
             />
           </>
         ) : (
@@ -1160,11 +1178,20 @@ export default function App() {
             xVariable={xVariable}
             ignoredSessionIds={ignoredSessionIds}
             onToggleIgnore={handleToggleIgnore}
+            onInspectSession={setInspectedSessionId}
           />
         )}
       </main>
 
       {/* Modals */}
+      {inspectedSessionId && (
+        <SessionDetailsModal
+          sessionId={inspectedSessionId}
+          onClose={() => setInspectedSessionId(null)}
+          isIgnored={ignoredSessionIds.includes(inspectedSessionId)}
+          onToggleIgnore={handleToggleIgnore}
+        />
+      )}
       <SettingsModal
         isOpen={isSettingsOpen}
         onClose={() => setIsSettingsOpen(false)}

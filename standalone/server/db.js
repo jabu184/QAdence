@@ -41,6 +41,7 @@ db.exec(`
     unit TEXT,
     data_type TEXT,
     is_numeric INTEGER DEFAULT 1,
+    formatting TEXT,
     UNIQUE(name, test_list_name)
   );
 
@@ -85,6 +86,7 @@ db.exec(`
     tolerance_min REAL,
     tolerance_max REAL,
     status TEXT,
+    pass_fail TEXT,
     FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE
   );
 
@@ -154,6 +156,16 @@ try {
   const presetCols = db.prepare("PRAGMA table_info(presets)").all().map(c => c.name);
   if (!presetCols.includes('order_index')) {
     db.exec("ALTER TABLE presets ADD COLUMN order_index INTEGER DEFAULT 0");
+  }
+
+  const tvCols = db.prepare("PRAGMA table_info(test_values)").all().map(c => c.name);
+  if (!tvCols.includes('pass_fail')) {
+    db.exec("ALTER TABLE test_values ADD COLUMN pass_fail TEXT");
+  }
+
+  const tdCols = db.prepare("PRAGMA table_info(test_definitions)").all().map(c => c.name);
+  if (!tdCols.includes('formatting')) {
+    db.exec("ALTER TABLE test_definitions ADD COLUMN formatting TEXT");
   }
 } catch (e) {
   console.warn('Migration warning:', e.message);

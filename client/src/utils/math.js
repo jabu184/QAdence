@@ -346,3 +346,51 @@ export function computeNormalDistribution(numbers) {
     pdf
   };
 }
+
+/**
+ * Identify outlier sessions across visible datasets using Tukey's 1.5 * IQR rule.
+ * Returns an array of session IDs that qualify as statistical outliers.
+ */
+export function identifyOutlierSessionIds(datasets = [], datasetResults = {}, ignoredSessionIds = []) {
+  const ignoredSet = new Set(ignoredSessionIds);
+  const outlierSessionIds = new Set();
+
+  datasets.forEach(ds => {
+    if (ds.visible === false) return;
+    const allPts = datasetResults[ds.id]?.dataPoints || [];
+    const activePts = allPts.filter(
+      p => p && p.sessionId && !ignoredSet.has(p.sessionId) && typeof p.y === 'number' && !isNaN(p.y)
+    );
+
+    if (activePts.length < 4) return;
+
+    const sorted = [...activePts].sort((a, b) => a.y - b.y);
+    const n = sorted.length;
+
+    const getPercentile = (p) => {
+      const pos = (n - 1) * p;
+      const base = Math.floor(pos);
+      const rest = pos - base;
+      if (sorted[base + 1] !== undefined) {
+        return sorted[base].y + rest * (sorted[base + 1].y - sorted[base].y);
+      }
+      return sorted[base].y;
+    };
+
+    const q1 = getPercentile(0.25);
+    const q3 = getPercentile(0.75);
+    const iqr = q3 - q1;
+
+    // Tukey's fences
+    const lowerFence = q1 - 1.5 * iqr;
+    const upperFence = q3 + 1.5 * iqr;
+
+    activePts.forEach(pt => {
+      if (pt.y < lowerFence || pt.y > upperFence) {
+        outlierSessionIds.add(pt.sessionId);
+      }
+    });
+  });
+
+  return Array.from(outlierSessionIds);
+}

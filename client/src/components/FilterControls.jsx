@@ -91,7 +91,7 @@ export default function FilterControls({
     fetchValuesForTest(defaultTest);
     onChangeFilters([
       ...filters,
-      { testName: defaultTest, operator: 'equals', value: '' }
+      { testName: defaultTest, operator: 'equals', value: '', logic: 'and' }
     ]);
   };
 
@@ -456,6 +456,51 @@ export default function FilterControls({
             </span>
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+            {filters.length > 1 && (
+              <div style={{ display: 'flex', alignItems: 'center', gap: '4px', fontSize: '0.75rem', background: '#f1f5f9', padding: '2px 6px', borderRadius: '6px' }}>
+                <span style={{ color: '#64748b', fontWeight: '600' }}>Match:</span>
+                <button
+                  type="button"
+                  onClick={() => {
+                    const updated = filters.map((f, i) => i === 0 ? f : { ...f, logic: 'and' });
+                    onChangeFilters(updated);
+                  }}
+                  title="Require ALL conditions to be met (AND logic)"
+                  style={{
+                    padding: '2px 7px',
+                    borderRadius: '4px',
+                    border: 'none',
+                    background: filters.slice(1).every(f => (f.logic || 'and').toLowerCase() === 'and') ? '#2563eb' : 'transparent',
+                    color: filters.slice(1).every(f => (f.logic || 'and').toLowerCase() === 'and') ? '#ffffff' : '#475569',
+                    fontSize: '0.72rem',
+                    fontWeight: '700',
+                    cursor: 'pointer'
+                  }}
+                >
+                  ALL (AND)
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    const updated = filters.map((f, i) => i === 0 ? f : { ...f, logic: 'or' });
+                    onChangeFilters(updated);
+                  }}
+                  title="Require ANY condition to be met (OR logic)"
+                  style={{
+                    padding: '2px 7px',
+                    borderRadius: '4px',
+                    border: 'none',
+                    background: filters.slice(1).every(f => (f.logic || 'and').toLowerCase() === 'or') ? '#7c3aed' : 'transparent',
+                    color: filters.slice(1).every(f => (f.logic || 'and').toLowerCase() === 'or') ? '#ffffff' : '#475569',
+                    fontSize: '0.72rem',
+                    fontWeight: '700',
+                    cursor: 'pointer'
+                  }}
+                >
+                  ANY (OR)
+                </button>
+              </div>
+            )}
             {onRunQuery && isConfigStale && (
               <button
                 type="button"
@@ -516,6 +561,7 @@ export default function FilterControls({
           <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
             {filters.map((f, idx) => {
               const knownValues = testValuesCache[f.testName] || [];
+              const isOr = (f.logic || 'and').toLowerCase() === 'or';
               return (
                 <div
                   key={idx}
@@ -531,7 +577,45 @@ export default function FilterControls({
                     zIndex: filters.length - idx + 10
                   }}
                 >
-                  <span style={{ fontSize: '0.75rem', fontWeight: '600', color: '#64748b' }}>WHERE</span>
+                  {idx === 0 ? (
+                    <span style={{
+                      fontSize: '0.75rem',
+                      fontWeight: '700',
+                      color: '#64748b',
+                      padding: '3px 8px',
+                      background: '#f1f5f9',
+                      borderRadius: '5px',
+                      minWidth: '50px',
+                      textAlign: 'center'
+                    }}>
+                      WHERE
+                    </span>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const nextLogic = isOr ? 'and' : 'or';
+                        handleUpdateFilter(idx, 'logic', nextLogic);
+                      }}
+                      title="Click to toggle between AND and OR logic"
+                      style={{
+                        fontSize: '0.75rem',
+                        fontWeight: '700',
+                        color: isOr ? '#7c3aed' : '#2563eb',
+                        background: isOr ? '#f5f3ff' : '#eff6ff',
+                        border: isOr ? '1px solid #ddd6fe' : '1px solid #bfdbfe',
+                        padding: '3px 8px',
+                        borderRadius: '5px',
+                        minWidth: '50px',
+                        textAlign: 'center',
+                        cursor: 'pointer',
+                        boxShadow: '0 1px 2px rgba(0,0,0,0.05)',
+                        transition: 'all 0.15s ease'
+                      }}
+                    >
+                      {isOr ? 'OR ⇅' : 'AND ⇅'}
+                    </button>
+                  )}
 
                   {/* Test selector with test list filter and instant search */}
                   <div style={{ minWidth: '220px', maxWidth: '320px', flex: '1 1 220px' }}>

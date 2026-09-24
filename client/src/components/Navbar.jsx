@@ -1,5 +1,6 @@
 import React from 'react';
 import { Activity, RefreshCw, Settings, Database, Bookmark, PlusCircle, RotateCcw, Sparkles, SlidersHorizontal, Trash2 } from 'lucide-react';
+import SearchablePresetSelect from './SearchablePresetSelect';
 
 export default function Navbar({
   status,
@@ -78,28 +79,14 @@ export default function Navbar({
 
       {/* Preset Selector & Action Buttons */}
       <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
-        {/* Preset Selector */}
+        {/* Preset Selector with instant search */}
         <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
           <Bookmark size={16} color="#64748b" />
-          <select
-            value={selectedPreset}
-            onChange={(e) => onSelectPreset(e.target.value)}
-            style={{
-              padding: '0.45rem 0.85rem',
-              borderRadius: '8px',
-              border: '1px solid #cbd5e1',
-              fontSize: '0.85rem',
-              backgroundColor: '#f8fafc',
-              color: '#0f172a',
-              outline: 'none',
-              maxWidth: '220px'
-            }}
-          >
-            <option value="">-- Load QA Preset --</option>
-            {presets.map(p => (
-              <option key={p.id} value={p.id}>{p.name}</option>
-            ))}
-          </select>
+          <SearchablePresetSelect
+            presets={presets}
+            selectedPresetId={selectedPreset}
+            onSelectPreset={onSelectPreset}
+          />
 
           <button
             onClick={onOpenSavePreset}

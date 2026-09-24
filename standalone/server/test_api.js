@@ -620,6 +620,109 @@ const server = app.listen(5099, async () => {
 
     console.log('Verified: Multi-frequency and ad-hoc test lists captured and queryable correctly!');
 
+    // 5. Test GET /api/session-details/:id, previous/following calculations, and clean comments
+    console.log('Testing GET /api/session-details/:id endpoint...');
+    // Seed test definition with formatting string
+    db.prepare(`INSERT OR REPLACE INTO test_definitions (name, slug, test_list_name, unit, data_type, is_numeric, formatting) VALUES ('Output 6MV', 'output_6mv', 'Weekly Linac', '%', 'simple', 1, '%.2f')`).run();
+    // Set a raw URL comment on sWeekly to test sanitization
+    db.prepare(`UPDATE sessions SET comments = '["http://localhost:8000/api/qc/comments/101/"]' WHERE id = ?`).run(sWeekly);
+    // Mark test on sWeekly as Action level
+    db.prepare(`UPDATE test_values SET pass_fail = 'action' WHERE session_id = ? AND test_name = 'Output 6MV'`).run(sWeekly);
+
+    const weeklyDetails = await axios.get(`${base}/session-details/${sWeekly}`);
+    if (!weeklyDetails.data.success || !weeklyDetails.data.session) {
+      throw new Error(`Expected success and session in session-details, got ${JSON.stringify(weeklyDetails.data)}`);
+    }
+    // Verify raw comments URL was sanitized and addresses are not shown
+    if (weeklyDetails.data.session.comments.includes('http://') || weeklyDetails.data.session.comments.includes('api/qc')) {
+      throw new Error(`Expected sanitized comments without raw URLs, got: ${weeklyDetails.data.session.comments}`);
+    }
+
+    const outputTest = weeklyDetails.data.testValues.find(tv => tv.test_name === 'Output 6MV');
+    if (!outputTest) {
+      throw new Error(`Expected 'Output 6MV' test in session details`);
+    }
+    // Verify Action level tolerance marking
+    if (outputTest.toleranceLevel !== 'action') {
+      throw new Error(`Expected toleranceLevel 'action', got: ${outputTest.toleranceLevel}`);
+    }
+    // Verify Previous reading
+    if (!outputTest.previous || outputTest.previous.value_numeric !== 100.2) {
+      throw new Error(`Expected previous value 100.2, got: ${JSON.stringify(outputTest.previous)}`);
+    }
+    if (outputTest.previous.arrow !== '↓') {
+      throw new Error(`Expected previous arrow '↓', got: ${outputTest.previous.arrow}`);
+    }
+    // Verify Following reading
+    if (!outputTest.following || outputTest.following.value_numeric !== 100.1) {
+      throw new Error(`Expected following value 100.1, got: ${JSON.stringify(outputTest.following)}`);
+    }
+    if (outputTest.following.arrow !== '↓') {
+      throw new Error(`Expected following arrow '↓', got: ${outputTest.following.arrow}`);
+    }
+
+    const detailsRes = await axios.get(`${base}/session-details/${sMonthly}`);
+    if (!detailsRes.data.success || !detailsRes.data.session) {
+      throw new Error(`Expected success and session in session-details, got ${JSON.stringify(detailsRes.data)}`);
+    }
+    if (detailsRes.data.session.unit_name !== 'TrueBeam 1' || detailsRes.data.testValues.length === 0) {
+      throw new Error(`Unexpected session details: ${JSON.stringify(detailsRes.data)}`);
+    }
+    if (!detailsRes.data.qatrackWebUrl || !detailsRes.data.qatrackWebUrl.includes('/qa/session/details/101/')) {
+      throw new Error(`Expected qatrackWebUrl with /qa/session/details/101/, got ${detailsRes.data.qatrackWebUrl}`);
+    }
+    console.log('Verified: /api/session-details/:id returns complete metadata, previous/following comparisons, tolerance levels, and QATrack direct link!');
+
+    // 6. Test conditional filters combined with AND or OR
+    console.log('Testing conditional filters with AND or OR combination...');
+    // Create sessions with site 'Prostate' and 'Breast'
+    const sProstate = db.prepare(`INSERT INTO sessions (qatrack_instance_id, unit_id, unit_name, test_list_name, work_completed, created_by, status) VALUES (201, 1, 'TrueBeam 1', 'Patient Specific QA', '2026-03-01 10:00:00', 'Physicist', 'Pass')`).run().lastInsertRowid;
+    db.prepare(`INSERT INTO test_values (session_id, test_name, test_slug, value_string, value_numeric, unit, status) VALUES 
+      (?, 'Gamma Pass Rate (3%/3mm)', 'gamma_pass', '98.5', 98.5, '%', 'OK'),
+      (?, 'Site', 'site', 'Prostate', NULL, NULL, 'OK')
+    `).run(sProstate, sProstate);
+
+    const sBreast = db.prepare(`INSERT INTO sessions (qatrack_instance_id, unit_id, unit_name, test_list_name, work_completed, created_by, status) VALUES (202, 1, 'TrueBeam 1', 'Patient Specific QA', '2026-03-02 10:00:00', 'Physicist', 'Pass')`).run().lastInsertRowid;
+    db.prepare(`INSERT INTO test_values (session_id, test_name, test_slug, value_string, value_numeric, unit, status) VALUES 
+      (?, 'Gamma Pass Rate (3%/3mm)', 'gamma_pass', '99.1', 99.1, '%', 'OK'),
+      (?, 'Site', 'site', 'Breast', NULL, NULL, 'OK')
+    `).run(sBreast, sBreast);
+
+    const sLung = db.prepare(`INSERT INTO sessions (qatrack_instance_id, unit_id, unit_name, test_list_name, work_completed, created_by, status) VALUES (203, 1, 'TrueBeam 1', 'Patient Specific QA', '2026-03-03 10:00:00', 'Physicist', 'Pass')`).run().lastInsertRowid;
+    db.prepare(`INSERT INTO test_values (session_id, test_name, test_slug, value_string, value_numeric, unit, status) VALUES 
+      (?, 'Gamma Pass Rate (3%/3mm)', 'gamma_pass', '95.0', 95.0, '%', 'OK'),
+      (?, 'Site', 'site', 'Lung', NULL, NULL, 'OK')
+    `).run(sLung, sLung);
+
+    // Query with OR logic: Site = 'Prostate' OR Site = 'Breast' on TrueBeam 1
+    const orQueryRes = await axios.post(`${base}/query`, {
+      yVariable: 'Gamma Pass Rate (3%/3mm)',
+      units: ['TrueBeam 1'],
+      includeAllInstances: true,
+      filters: [
+        { testName: 'Site', operator: 'equals', value: 'Prostate' },
+        { testName: 'Site', operator: 'equals', value: 'Breast', logic: 'or' }
+      ]
+    });
+    if (orQueryRes.data.matchedPoints !== 2) {
+      throw new Error(`Expected 2 matched points for OR condition (Prostate OR Breast), got ${orQueryRes.data.matchedPoints}`);
+    }
+
+    // Query with AND logic: Site = 'Prostate' AND Site = 'Breast' (should return 0)
+    const andQueryRes = await axios.post(`${base}/query`, {
+      yVariable: 'Gamma Pass Rate (3%/3mm)',
+      units: ['TrueBeam 1'],
+      includeAllInstances: true,
+      filters: [
+        { testName: 'Site', operator: 'equals', value: 'Prostate' },
+        { testName: 'Site', operator: 'equals', value: 'Breast', logic: 'and' }
+      ]
+    });
+    if (andQueryRes.data.matchedPoints !== 0) {
+      throw new Error(`Expected 0 matched points for AND condition (Prostate AND Breast), got ${andQueryRes.data.matchedPoints}`);
+    }
+    console.log('Verified: Multiple conditional filters with AND and OR combination logic work properly!');
+
     console.log('ALL API TESTS PASSED SUCCESSFULLY!');
   } catch (err) {
     console.error('Test failed:', err.response?.data || err.message);
