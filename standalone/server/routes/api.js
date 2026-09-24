@@ -538,7 +538,7 @@ router.post('/query', async (req, res) => {
       xVariable,   // e.g. 'Planned Dose' or 'work_completed'
       yVariable,   // e.g. 'Measured Dose' or 'Gamma Pass Rate (3%/3mm)'
       groupBy,     // e.g. 'unit_name' or 'Site' or 'Beam Energy'
-      metadataTests = ['Patient ID', 'Plan Name', 'Site', 'Beam Energy', 'Delivery Technique'],
+      metadataTests = ['Patient ID', 'Plan ID', 'Plan Name', 'Site', 'Beam Energy', 'Delivery Technique'],
       pullOnDemand = false
     } = req.body;
 
@@ -807,6 +807,13 @@ router.post('/query', async (req, res) => {
       for (const mt of metadataTests) {
         if (sessVals[mt]) {
           meta[mt] = sessVals[mt].value_string || sessVals[mt].value_numeric;
+        }
+      }
+      // Ensure Plan ID is resolved from test values (checking variants, or fallback to Plan Name)
+      if (!meta['Plan ID']) {
+        const planCandidate = sessVals['Plan ID'] || sessVals['Plan Id'] || sessVals['plan_id'] || sessVals['Plan'] || sessVals['Plan Number'] || sessVals['Plan Name'];
+        if (planCandidate) {
+          meta['Plan ID'] = planCandidate.value_string || planCandidate.value_numeric;
         }
       }
 

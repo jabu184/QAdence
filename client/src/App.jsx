@@ -918,66 +918,6 @@ export default function App() {
     }
   };
 
-  // Load Demonstration QA Dataset
-  const handleLoadDemoData = async () => {
-    if (status?.db?.sessionCount > 0) {
-      if (!window.confirm('Load sample demonstration QA dataset? This will add realistic longitudinal QA metrics and machine records to the database.')) {
-        return;
-      }
-    }
-    setIsLoading(true);
-    try {
-      const res = await fetch('/api/demo/load', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ clearExisting: false })
-      });
-      const data = await res.json();
-      if (data.success) {
-        queryCacheRef.current.clear();
-        await loadMetadata();
-        const demoDsId = `ds-${Date.now()}`;
-        const demoDatasets = [
-          {
-            id: demoDsId,
-            name: 'Demo Linacs (All)',
-            color: DEFAULT_PALETTE[0],
-            visible: true,
-            units: [],
-            testLists: [],
-            includeAllInstances: true,
-            dateFrom: '',
-            dateTo: '',
-            filters: []
-          }
-        ];
-        setDatasets(demoDatasets);
-        setActiveDatasetId(demoDsId);
-        setIgnoredSessionIds([]);
-        setYVariable('Overall Gamma (%)');
-        setXVariable('work_completed');
-        setIncludeAllInstances(true);
-        setSelectedTestList('');
-        setHasLoaded(true);
-        setIsConfigStale(false);
-
-        await runAllQueries({
-          datasets: demoDatasets,
-          yVariable: 'Overall Gamma (%)',
-          xVariable: 'work_completed',
-          includeAllInstances: true,
-          selectedTestList: ''
-        });
-      } else {
-        alert('Failed to load demo data: ' + (data.error || 'Unknown error'));
-      }
-    } catch (err) {
-      alert('Error loading demo data: ' + err.message);
-    } finally {
-      setIsLoading(false);
-    }
-  };
-
   // Ignore Handlers
   const handleIgnorePoint = (sessionId) => {
     setIgnoredSessionIds(prev => (prev.includes(sessionId) ? prev : [...prev, sessionId]));
@@ -1041,7 +981,6 @@ export default function App() {
         onSync={handleSync}
         onClearData={handleClearData}
         onNewAnalysis={handleNewAnalysis}
-        onLoadDemoData={handleLoadDemoData}
         isSyncing={isSyncing}
       />
 
@@ -1082,7 +1021,6 @@ export default function App() {
           onRetrieveData={handleRunLocalQuery}
           onRunLocalQuery={handleRunLocalQuery}
           onFetchFromQATrack={handleFetchFromQATrack}
-          onLoadDemoData={handleLoadDemoData}
           isLoading={isLoading || isSyncing}
           totalLoadedRecords={combinedTableRows.length}
           hasLoaded={hasLoaded}

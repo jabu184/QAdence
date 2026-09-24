@@ -1,6 +1,7 @@
-import React from 'react';
-import { Activity, RefreshCw, Settings, Database, Bookmark, PlusCircle, RotateCcw, Sparkles, SlidersHorizontal, Trash2 } from 'lucide-react';
+import React, { useState } from 'react';
+import { Activity, RefreshCw, Settings, Database, Bookmark, PlusCircle, RotateCcw, SlidersHorizontal, Trash2 } from 'lucide-react';
 import SearchablePresetSelect from './SearchablePresetSelect';
+import AboutModal from './AboutModal';
 
 export default function Navbar({
   status,
@@ -13,9 +14,9 @@ export default function Navbar({
   onSync,
   onClearData,
   onNewAnalysis,
-  onLoadDemoData,
   isSyncing
 }) {
+  const [isAboutOpen, setIsAboutOpen] = useState(false);
   const activePreset = presets.find(p => String(p.id) === String(selectedPreset));
 
   return (
@@ -36,12 +37,18 @@ export default function Navbar({
           <img
             src="/logo.jpg"
             alt="QAdence - Trends & Analysis"
+            onClick={() => setIsAboutOpen(true)}
+            title="About QAdence (Click for info)"
             style={{
               height: '84px',
               width: 'auto',
               objectFit: 'contain',
-              display: 'block'
+              display: 'block',
+              cursor: 'pointer',
+              transition: 'transform 0.15s ease, opacity 0.15s ease'
             }}
+            onMouseEnter={(e) => { e.currentTarget.style.opacity = '0.88'; }}
+            onMouseLeave={(e) => { e.currentTarget.style.opacity = '1'; }}
           />
         </div>
         <div>
@@ -170,29 +177,6 @@ export default function Navbar({
           New Analysis
         </button>
 
-        {/* Load Demo Data button */}
-        <button
-          onClick={onLoadDemoData}
-          title="Load sample QA dataset for demonstration & testing (Linacs, Gamma Pass Rates, Multi-variable correlation)"
-          style={{
-            display: 'flex',
-            alignItems: 'center',
-            gap: '0.4rem',
-            padding: '0.5rem 0.85rem',
-            borderRadius: '8px',
-            border: '1px solid #cbd5e1',
-            backgroundColor: '#ffffff',
-            color: '#4338ca',
-            fontSize: '0.85rem',
-            fontWeight: '600',
-            cursor: 'pointer',
-            boxShadow: '0 1px 2px rgba(0,0,0,0.04)'
-          }}
-        >
-          <Sparkles size={14} color="#6366f1" />
-          Demo Data
-        </button>
-
         {/* Fast Structure Sync (Units + Test Lists) */}
         <button
           onClick={() => onSync({ mode: 'metadata' })}
@@ -279,6 +263,9 @@ export default function Navbar({
           <Settings size={18} />
         </button>
       </div>
+
+      {/* About QAdence Modal Splash */}
+      <AboutModal isOpen={isAboutOpen} onClose={() => setIsAboutOpen(false)} />
     </header>
   );
 }

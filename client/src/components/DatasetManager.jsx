@@ -1,5 +1,5 @@
 import React, { useMemo } from 'react';
-import { Plus, Trash2, Copy, Eye, EyeOff, Layers, Sliders, TrendingUp, Globe, RefreshCw, Sparkles, CloudDownload } from 'lucide-react';
+import { Plus, Trash2, Copy, Eye, EyeOff, Layers, Sliders, TrendingUp, Globe, RefreshCw, CloudDownload } from 'lucide-react';
 import FilterControls from './FilterControls';
 import SearchableVariableSelect from './SearchableVariableSelect';
 import { groupTestsByList, getSortedGroupedTests, getUniqueTests } from '../utils/testGrouping';
@@ -51,7 +51,6 @@ export default function DatasetManager({
   onRetrieveData,
   onRunLocalQuery,
   onFetchFromQATrack,
-  onLoadDemoData,
   isLoading = false,
   totalLoadedRecords = 0,
   hasLoaded = false,
@@ -239,28 +238,6 @@ export default function DatasetManager({
                   }}>
                     {hasLoaded ? '0 pts matched' : 'Local DB Ready'}
                   </span>
-                  {onLoadDemoData && (
-                    <button
-                      type="button"
-                      onClick={onLoadDemoData}
-                      title="Load demo data for multi-linac trend and correlation exploration"
-                      style={{
-                        display: 'flex',
-                        alignItems: 'center',
-                        gap: '4px',
-                        fontSize: '0.75rem',
-                        fontWeight: '600',
-                        color: '#4338ca',
-                        background: '#eef2ff',
-                        padding: '0.35rem 0.6rem',
-                        borderRadius: '6px',
-                        border: '1px solid #c7d2fe',
-                        cursor: 'pointer'
-                      }}
-                    >
-                      <Sparkles size={12} color="#6366f1" /> Demo Data
-                    </button>
-                  )}
                 </div>
               )}
             </div>

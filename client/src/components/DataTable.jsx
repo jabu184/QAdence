@@ -29,6 +29,7 @@ export default function DataTable({
         (r.testList && r.testList.toLowerCase().includes(q)) ||
         (r['Patient ID'] && String(r['Patient ID']).toLowerCase().includes(q)) ||
         (r['Patient QA Patient ID'] && String(r['Patient QA Patient ID']).toLowerCase().includes(q)) ||
+        (r['Plan ID'] && String(r['Plan ID']).toLowerCase().includes(q)) ||
         (r['Plan Name'] && String(r['Plan Name']).toLowerCase().includes(q)) ||
         (r.unit && r.unit.toLowerCase().includes(q)) ||
         (r['Site'] && String(r['Site']).toLowerCase().includes(q)) ||
@@ -37,8 +38,8 @@ export default function DataTable({
     }
 
     result.sort((a, b) => {
-      let va = a[sortField];
-      let vb = b[sortField];
+      let va = sortField === 'Plan ID' ? (a['Plan ID'] || a['Plan Name']) : a[sortField];
+      let vb = sortField === 'Plan ID' ? (b['Plan ID'] || b['Plan Name']) : b[sortField];
       if (va === undefined || va === null) return 1;
       if (vb === undefined || vb === null) return -1;
       if (typeof va === 'number' && typeof vb === 'number') {
@@ -63,7 +64,7 @@ export default function DataTable({
       'Unit',
       'Test List',
       'Patient ID',
-      'Plan Name',
+      'Plan ID',
       'Site',
       'Beam Energy',
       yVariable,
@@ -74,6 +75,7 @@ export default function DataTable({
     const csvLines = [headers.join(',')];
     for (const r of rowsToExport) {
       const patId = r['Patient ID'] || r['Patient QA Patient ID'] || '';
+      const planIdVal = r['Plan ID'] || r['Plan Name'] || '';
       const site = r['Site'] || r['Patient QA Site'] || '';
       const energy = r['Beam Energy'] || r['Energy'] || '';
       const line = [
@@ -82,7 +84,7 @@ export default function DataTable({
         `"${r.unit || ''}"`,
         `"${r.testList || ''}"`,
         `"${patId}"`,
-        `"${r['Plan Name'] || ''}"`,
+        `"${planIdVal}"`,
         `"${site}"`,
         `"${energy}"`,
         r[yVariable] !== undefined ? r[yVariable] : '',
@@ -181,8 +183,8 @@ export default function DataTable({
               <th onClick={() => toggleSort('Patient ID')} style={{ padding: '8px 12px', cursor: 'pointer' }}>
                 Patient ID
               </th>
-              <th onClick={() => toggleSort('Plan Name')} style={{ padding: '8px 12px', cursor: 'pointer' }}>
-                Plan Name
+              <th onClick={() => toggleSort('Plan ID')} style={{ padding: '8px 12px', cursor: 'pointer' }}>
+                Plan ID {sortField === 'Plan ID' && (sortAsc ? '↑' : '↓')}
               </th>
               <th onClick={() => toggleSort('Site')} style={{ padding: '8px 12px', cursor: 'pointer' }}>
                 Site
@@ -205,6 +207,7 @@ export default function DataTable({
             {filteredRows.map((r, i) => {
               const isIgnored = ignoredSet.has(r.sessionId);
               const patId = r['Patient ID'] || r['Patient QA Patient ID'] || '-';
+              const planId = r['Plan ID'] || r['Plan Name'] || '-';
               const site = r['Site'] || r['Patient QA Site'] || '-';
               const energy = r['Beam Energy'] || r['Energy'] || '-';
 
@@ -275,7 +278,7 @@ export default function DataTable({
                   <td style={{ padding: '8px 12px', fontWeight: '500' }}>{r.unit}</td>
                   <td style={{ padding: '8px 12px', color: '#475569', fontSize: '0.78rem' }}>{r.testList || '-'}</td>
                   <td style={{ padding: '8px 12px', fontFamily: 'monospace', fontWeight: '600' }}>{patId}</td>
-                  <td style={{ padding: '8px 12px' }}>{r['Plan Name'] || '-'}</td>
+                  <td style={{ padding: '8px 12px' }}>{planId}</td>
                   <td style={{ padding: '8px 12px' }}>
                     <span style={{ padding: '2px 6px', background: '#f1f5f9', borderRadius: '4px', fontSize: '0.75rem' }}>
                       {site}

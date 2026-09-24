@@ -651,7 +651,8 @@ export default function ChartCanvas({
               const lines = [];
               if (meta.testList) lines.push(`Test List: ${meta.testList}`);
               if (meta['Patient ID'] || meta['Patient QA Patient ID']) lines.push(`Patient ID: ${meta['Patient ID'] || meta['Patient QA Patient ID']}`);
-              if (meta['Plan Name']) lines.push(`Plan: ${meta['Plan Name']}`);
+              const planVal = meta['Plan ID'] || meta['Plan Name'];
+              if (planVal) lines.push(`Plan ID: ${planVal}`);
               if (meta.date) lines.push(`Date: ${meta.date.substring(0, 10)}`);
               if (meta.unit) lines.push(`Unit: ${meta.unit}`);
               if (meta['Site'] || meta['Patient QA Site']) lines.push(`Site: ${meta['Site'] || meta['Patient QA Site']}`);

@@ -417,149 +417,42 @@ export default function SessionDetailsModal({
                               {/* Previous Reading */}
                               <td style={{ padding: '9px 12px', color: '#1e293b' }}>
                                 {tv.previous ? (
-                                  <div
-                                    title={`Previous reading on ${new Date(tv.previous.date).toLocaleDateString()}: ${tv.previous.value_string}${tv.unit ? ' ' + tv.unit : ''} (${tv.previous.diffPercent !== null ? (tv.previous.diffPercent >= 0 ? '+' : '') + Number(tv.previous.diffPercent).toFixed(1) + '% vs current' : 'comparison unavailable'})`}
-                                    style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap' }}
+                                  <span
+                                    title={`Previous reading on ${new Date(tv.previous.date).toLocaleDateString()}: ${tv.previous.value_string}${tv.unit ? ' ' + tv.unit : ''}`}
+                                    style={{ fontFamily: 'monospace', fontWeight: '700', fontSize: '0.88rem', color: '#0f172a' }}
                                   >
-                                    <span style={{ fontFamily: 'monospace', fontWeight: '700' }}>
-                                      {tv.previous.value_string}
-                                    </span>
-                                    {tv.previous.diffPercent !== null && (
-                                      <span style={{
-                                        display: 'inline-flex',
-                                        alignItems: 'center',
-                                        gap: '2px',
-                                        fontSize: '0.72rem',
-                                        fontWeight: '700',
-                                        padding: '1px 5px',
-                                        borderRadius: '4px',
-                                        background: tv.previous.diffPercent === 0 ? '#f1f5f9' : (tv.previous.diffPercent > 0 ? '#eff6ff' : '#f8fafc'),
-                                        color: tv.previous.diffPercent === 0 ? '#64748b' : (tv.previous.diffPercent > 0 ? '#2563eb' : '#475569')
-                                      }}>
-                                        <span>{tv.previous.diffPercent >= 0 ? '+' : ''}{Number(tv.previous.diffPercent).toFixed(1)}%</span>
-                                        <span style={{ fontSize: '0.82rem', lineHeight: 1 }}>{tv.previous.arrow}</span>
-                                      </span>
-                                    )}
-                                  </div>
+                                    {tv.previous.value_string}
+                                  </span>
                                 ) : (
                                   <span style={{ color: '#94a3b8' }}>—</span>
                                 )}
                               </td>
 
-                              {/* Current Value (Marked in Red if Action, Orange if Tolerance, Blue if No Tolerance) */}
+                              {/* Current Value (Marked in Red if Action, Orange if Tolerance, standard dark otherwise) */}
                               <td style={{ padding: '9px 12px' }}>
-                                {tv.toleranceLevel === 'action' ? (
-                                  <div style={{
-                                    display: 'inline-flex',
-                                    alignItems: 'center',
-                                    gap: '6px',
-                                    padding: '3px 8px',
-                                    borderRadius: '6px',
-                                    background: '#fef2f2',
-                                    border: '1.5px solid #f87171',
-                                    color: '#dc2626',
-                                    fontWeight: '800'
-                                  }}>
-                                    <span style={{ fontFamily: 'monospace', fontSize: '0.88rem' }}>{displayVal}</span>
-                                    <span style={{
-                                      fontSize: '0.65rem',
-                                      fontWeight: '800',
-                                      textTransform: 'uppercase',
-                                      background: '#dc2626',
-                                      color: '#ffffff',
-                                      padding: '1px 5px',
-                                      borderRadius: '3px',
-                                      letterSpacing: '0.03em'
-                                    }}>
-                                      Action
-                                    </span>
-                                  </div>
-                                ) : tv.toleranceLevel === 'tolerance' ? (
-                                  <div style={{
-                                    display: 'inline-flex',
-                                    alignItems: 'center',
-                                    gap: '6px',
-                                    padding: '3px 8px',
-                                    borderRadius: '6px',
-                                    background: '#fffbeb',
-                                    border: '1.5px solid #fbbf24',
-                                    color: '#d97706',
-                                    fontWeight: '800'
-                                  }}>
-                                    <span style={{ fontFamily: 'monospace', fontSize: '0.88rem' }}>{displayVal}</span>
-                                    <span style={{
-                                      fontSize: '0.65rem',
-                                      fontWeight: '800',
-                                      textTransform: 'uppercase',
-                                      background: '#d97706',
-                                      color: '#ffffff',
-                                      padding: '1px 5px',
-                                      borderRadius: '3px',
-                                      letterSpacing: '0.03em'
-                                    }}>
-                                      Tolerance
-                                    </span>
-                                  </div>
-                                ) : tv.toleranceLevel === 'no_tolerance' ? (
-                                  <div style={{
-                                    display: 'inline-flex',
-                                    alignItems: 'center',
-                                    gap: '6px',
-                                    padding: '3px 8px',
-                                    borderRadius: '6px',
-                                    background: '#eff6ff',
-                                    border: '1.5px solid #93c5fd',
-                                    color: '#1d4ed8',
-                                    fontWeight: '700'
-                                  }}>
-                                    <span style={{ fontFamily: 'monospace', fontSize: '0.88rem' }}>{displayVal}</span>
-                                    <span style={{
-                                      fontSize: '0.65rem',
-                                      fontWeight: '700',
-                                      textTransform: 'uppercase',
-                                      background: '#3b82f6',
-                                      color: '#ffffff',
-                                      padding: '1px 5px',
-                                      borderRadius: '3px',
-                                      letterSpacing: '0.03em'
-                                    }}>
-                                      No Tolerance
-                                    </span>
-                                  </div>
-                                ) : (
-                                  <span style={{ fontFamily: 'monospace', fontWeight: '700', color: '#0f172a', fontSize: '0.88rem' }}>
-                                    {displayVal}
-                                  </span>
-                                )}
+                                <span style={{
+                                  fontFamily: 'monospace',
+                                  fontSize: '0.88rem',
+                                  fontWeight: (tv.toleranceLevel === 'action' || tv.toleranceLevel === 'tolerance') ? '800' : '700',
+                                  color: tv.toleranceLevel === 'action'
+                                    ? '#dc2626'
+                                    : tv.toleranceLevel === 'tolerance'
+                                    ? '#d97706'
+                                    : '#0f172a'
+                                }}>
+                                  {displayVal}
+                                </span>
                               </td>
 
                               {/* Following Reading */}
                               <td style={{ padding: '9px 12px', color: '#1e293b' }}>
                                 {tv.following ? (
-                                  <div
-                                    title={`Following reading on ${new Date(tv.following.date).toLocaleDateString()}: ${tv.following.value_string}${tv.unit ? ' ' + tv.unit : ''} (${tv.following.diffPercent !== null ? (tv.following.diffPercent >= 0 ? '+' : '') + Number(tv.following.diffPercent).toFixed(1) + '% vs current' : 'comparison unavailable'})`}
-                                    style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap' }}
+                                  <span
+                                    title={`Following reading on ${new Date(tv.following.date).toLocaleDateString()}: ${tv.following.value_string}${tv.unit ? ' ' + tv.unit : ''}`}
+                                    style={{ fontFamily: 'monospace', fontWeight: '700', fontSize: '0.88rem', color: '#0f172a' }}
                                   >
-                                    <span style={{ fontFamily: 'monospace', fontWeight: '700' }}>
-                                      {tv.following.value_string}
-                                    </span>
-                                    {tv.following.diffPercent !== null && (
-                                      <span style={{
-                                        display: 'inline-flex',
-                                        alignItems: 'center',
-                                        gap: '2px',
-                                        fontSize: '0.72rem',
-                                        fontWeight: '700',
-                                        padding: '1px 5px',
-                                        borderRadius: '4px',
-                                        background: tv.following.diffPercent === 0 ? '#f1f5f9' : (tv.following.diffPercent > 0 ? '#eff6ff' : '#f8fafc'),
-                                        color: tv.following.diffPercent === 0 ? '#64748b' : (tv.following.diffPercent > 0 ? '#2563eb' : '#475569')
-                                      }}>
-                                        <span>{tv.following.diffPercent >= 0 ? '+' : ''}{Number(tv.following.diffPercent).toFixed(1)}%</span>
-                                        <span style={{ fontSize: '0.82rem', lineHeight: 1 }}>{tv.following.arrow}</span>
-                                      </span>
-                                    )}
-                                  </div>
+                                    {tv.following.value_string}
+                                  </span>
                                 ) : (
                                   <span style={{ color: '#94a3b8' }}>—</span>
                                 )}
