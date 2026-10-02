@@ -177,11 +177,11 @@ export default function Navbar({
           New Analysis
         </button>
 
-        {/* Fast Structure Sync (Units + Test Lists) */}
+        {/* Sync with QATrack+ (Primary Action: Downloads All Measurements & Metadata) */}
         <button
-          onClick={() => onSync({ mode: 'metadata' })}
+          onClick={() => onSync({ mode: 'full' })}
           disabled={isSyncing}
-          title="Fast Sync: pulls all units, test lists, and measurement variables from QATrack+ without downloading historical records (completes in ~2s)"
+          title="Sync with QATrack+: updates metadata and downloads all latest QA sessions and measurements"
           style={{
             display: 'flex',
             alignItems: 'center',
@@ -198,14 +198,14 @@ export default function Navbar({
           }}
         >
           <RefreshCw size={14} className={isSyncing ? 'spin' : ''} style={{ animation: isSyncing ? 'spin 1s linear infinite' : 'none' }} />
-          {isSyncing ? 'Syncing...' : 'Sync Structure'}
+          {isSyncing ? 'Syncing...' : 'Sync with QATrack+'}
         </button>
 
-        {/* Full Historical Records Sync */}
+        {/* Fast Structure Sync Only */}
         <button
-          onClick={() => onSync({ mode: 'full' })}
+          onClick={() => onSync({ mode: 'metadata' })}
           disabled={isSyncing}
-          title="Full Sync: pulls all historical QA sessions and measurements from QATrack+"
+          title="Sync Structure Only: pulls units, test lists, and measurement variables without historical records (~2s)"
           style={{
             display: 'flex',
             alignItems: 'center',
@@ -222,7 +222,7 @@ export default function Navbar({
           }}
         >
           <Database size={14} color="#64748b" />
-          Full Sync
+          Sync Structure Only
         </button>
 
         {/* Clear Data Button */}

@@ -1,3 +1,4 @@
+process.env.DB_PATH = require('path').join(__dirname, '..', 'data', 'test_fixture.db');
 const express = require('express');
 const cors = require('cors');
 const apiRouter = require('./routes/api');
@@ -50,21 +51,22 @@ const server = app.listen(5099, async () => {
     const unitsRes = await axios.get(`${base}/schema/units`);
     console.log('Units:', unitsRes.data);
 
-    // Verify active vs deactivated unit behavior
+    // Verify both active and deactivated machines appear with correct active flag
     db.prepare(`INSERT OR REPLACE INTO units (id, name, unit_class, unit_type, serial_number, location, active) VALUES (999, 'Test Deactivated Linac', 'Linac', '', '', '', 0)`).run();
     db.prepare(`INSERT OR REPLACE INTO units (id, name, unit_class, unit_type, serial_number, location, active) VALUES (998, 'Test Newly Added Linac', 'Linac', '', '', '', 1)`).run();
 
     const unitsAfterRes = await axios.get(`${base}/schema/units`);
-    const unitNames = unitsAfterRes.data.map(u => u.name);
-    if (!unitNames.includes('Test Newly Added Linac')) {
-      throw new Error('New active unit did not appear in /api/schema/units');
+    const deactUnit = unitsAfterRes.data.find(u => u.name === 'Test Deactivated Linac');
+    const actUnit = unitsAfterRes.data.find(u => u.name === 'Test Newly Added Linac');
+    if (!actUnit || actUnit.active !== 1) {
+      throw new Error('New active unit did not appear with active=1 in /api/schema/units');
     }
-    if (unitNames.includes('Test Deactivated Linac')) {
-      throw new Error('Deactivated unit incorrectly appeared in /api/schema/units');
+    if (!deactUnit || deactUnit.active !== 0) {
+      throw new Error('Deactivated unit missing or active flag incorrect in /api/schema/units');
     }
     // Clean up test units
     db.prepare(`DELETE FROM units WHERE id IN (998, 999)`).run();
-    console.log('Verified: newly added linac appears and deactivated linac is excluded!');
+    console.log('Verified: both active and decommissioned linacs appear with accurate active status!');
 
     console.log('Testing /api/schema/unit-classes...');
     const unitClassesRes = await axios.get(`${base}/schema/unit-classes`);
@@ -77,24 +79,30 @@ const server = app.listen(5099, async () => {
       throw new Error('Sync status missing memory metrics');
     }
 
-    console.log('Testing /api/schema/test-lists (excluding test lists with no data or inactive assignments)...');
-    // Insert an empty test list with no data
-    db.prepare(`INSERT OR REPLACE INTO test_lists (id, name, slug, description) VALUES (888, 'Empty Test List With No Data', 'empty-no-data', '')`).run();
-    // Insert an inactive assignment
-    db.prepare(`INSERT OR REPLACE INTO unit_test_collections (id, unit_id, unit_name, test_list_id, test_list_name, collection_name, active) VALUES (888, 1, 'TrueBeam 1', 888, 'Inactive Assignment List', '', 0)`).run();
+    console.log('Testing /api/schema/test-lists (including all test lists across all frequencies and definitions)...');
+    // Insert an ad-hoc / standalone test list definition
+    db.prepare(`INSERT OR REPLACE INTO test_lists (id, name, slug, description) VALUES (888, 'Ad-Hoc Standalone Test List', 'adhoc-standalone', '')`).run();
+    // Insert a test collection
+    db.prepare(`INSERT OR REPLACE INTO unit_test_collections (id, unit_id, unit_name, test_list_id, test_list_name, collection_name, active) VALUES (889, 1, 'TrueBeam 1', 889, 'Newly Assigned Test List', '', 1)`).run();
 
     const testListsRes = await axios.get(`${base}/schema/test-lists`);
     console.log('Test lists returned:', testListsRes.data);
-    if (testListsRes.data.includes('Empty Test List With No Data')) {
-      throw new Error('Test list with no data was incorrectly included in /api/schema/test-lists');
+    if (!testListsRes.data.includes('Ad-Hoc Standalone Test List')) {
+      throw new Error('Ad-hoc standalone test list did not appear in /api/schema/test-lists');
     }
-    if (testListsRes.data.includes('Inactive Assignment List')) {
-      throw new Error('Inactive test list assignment was incorrectly included in /api/schema/test-lists');
+    if (!testListsRes.data.includes('Newly Assigned Test List')) {
+      throw new Error('Newly assigned test list did not appear in /api/schema/test-lists');
     }
+    // Verify Cache-Control header is set on /api/schema/test-lists
+    const cacheHeader = testListsRes.headers['cache-control'] || '';
+    if (!cacheHeader.includes('no-store') && !cacheHeader.includes('no-cache')) {
+      throw new Error(`Cache-Control header missing on /api/schema/test-lists: ${cacheHeader}`);
+    }
+    console.log('Verified: all test lists appear in schema and Cache-Control is present!');
 
     // Clean up dummy rows
-    db.prepare(`DELETE FROM test_lists WHERE id = 888`).run();
-    db.prepare(`DELETE FROM unit_test_collections WHERE id = 888`).run();
+    db.prepare(`DELETE FROM test_lists WHERE id IN (888, 889)`).run();
+    db.prepare(`DELETE FROM unit_test_collections WHERE id IN (888, 889)`).run();
     console.log('Verified: test lists with no data and inactive assignments are strictly excluded!');
 
     const sortedCopy = [...testListsRes.data].sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }));
@@ -102,9 +110,13 @@ const server = app.listen(5099, async () => {
       throw new Error('Test lists are not sorted alphabetically!');
     }
 
-    console.log('Testing /api/schema/test-values for Site...');
+    console.log('Testing /api/schema/test-values for Site (both test_name and testName)...');
     const siteVals = await axios.get(`${base}/schema/test-values?test_name=Site`);
-    console.log('Site values:', siteVals.data);
+    const siteValsCamel = await axios.get(`${base}/schema/test-values?testName=Site`);
+    if (!siteVals.data.includes('Prostate') || !siteValsCamel.data.includes('Prostate')) {
+      throw new Error('test-values failed to return values with test_name or testName param');
+    }
+    console.log('Site values verified:', siteVals.data);
 
     console.log('Testing /api/query (includeAllInstances vs testLists scoping)...');
     const allInstancesRes = await axios.post(`${base}/query`, {
@@ -620,6 +632,40 @@ const server = app.listen(5099, async () => {
 
     console.log('Verified: Multi-frequency and ad-hoc test lists captured and queryable correctly!');
 
+    // 4b. Test Decommissioned Machines & Ad-Hoc UTI Machine Resolution
+    console.log('Testing Decommissioned Machine & Ad-Hoc UTI Resolution...');
+    // Seed decommissioned machine in units table
+    db.prepare(`INSERT OR REPLACE INTO units (id, name, unit_class, unit_type, serial_number, location, active) VALUES (77, 'Decommissioned Linac 2', 'CyberKnife', 'M6', 'SN77', 'Room 7', 0)`).run();
+    // Verify its unit class appears in /api/schema/unit-classes
+    const uClassesWithDecom = await axios.get(`${base}/schema/unit-classes`);
+    if (!uClassesWithDecom.data.includes('CyberKnife')) {
+      throw new Error(`Expected CyberKnife from decommissioned machine in /api/schema/unit-classes, got ${JSON.stringify(uClassesWithDecom.data)}`);
+    }
+
+    // Add UTI linked to decommissioned unit 77
+    db.prepare(`INSERT OR REPLACE INTO unit_test_infos (id, unit_id, unit_url, test_id, test_name, test_slug, unit, data_type, is_numeric) VALUES (7701, 77, 'http://localhost/api/units/77/', 501, 'Target Accuracy', 'target_acc', 'mm', 'simple', 1)`).run();
+
+    // Verify ad-hoc session UTI resolution: when unit_test_collection is null, resolve machine from UTI in SQLite
+    const sDecommissioned = db.prepare(`INSERT INTO sessions (qatrack_instance_id, unit_id, unit_name, test_list_name, work_completed, created_by, status) VALUES (77001, 77, 'Decommissioned Linac 2', 'CyberKnife Ad-Hoc QA', '2023-05-10 11:00:00', 'Physicist', 'Pass')`).run().lastInsertRowid;
+    db.prepare(`INSERT INTO test_values (session_id, test_name, test_slug, value_string, value_numeric, unit, status) VALUES (?, 'Target Accuracy', 'target_acc', '0.45', 0.45, 'mm', 'OK')`).run(sDecommissioned);
+
+    // Query for Target Accuracy on Decommissioned Linac 2
+    const decomRes = await axios.post(`${base}/query`, {
+      yVariable: 'Target Accuracy',
+      units: ['Decommissioned Linac 2'],
+      includeAllInstances: true
+    });
+    if (decomRes.data.matchedPoints !== 1 || decomRes.data.dataPoints[0].metadata?.unit !== 'Decommissioned Linac 2') {
+      throw new Error(`Expected 1 point for Decommissioned Linac 2, got ${JSON.stringify(decomRes.data)}`);
+    }
+
+    // Clean up decommissioned test data
+    db.prepare('DELETE FROM test_values WHERE session_id = ?').run(sDecommissioned);
+    db.prepare('DELETE FROM sessions WHERE id = ?').run(sDecommissioned);
+    db.prepare('DELETE FROM unit_test_infos WHERE id = 7701').run();
+    db.prepare('DELETE FROM units WHERE id = 77').run();
+    console.log('Verified: Decommissioned machines and ad-hoc UTI machine resolution verified!');
+
     // 5. Test GET /api/session-details/:id, previous/following calculations, and clean comments
     console.log('Testing GET /api/session-details/:id endpoint...');
     // Seed test definition with formatting string
@@ -773,6 +819,48 @@ const server = app.listen(5099, async () => {
     }
     console.log('Verified: Multiple conditional filters with AND and OR combination logic work properly!');
 
+    // Test Condition Groups / Bracketed logic: (Site = Lung OR Site = Prostate) AND Gated = 'true'
+    console.log('Testing Condition Groups with Bracketed logic: (Site = Lung OR Site = Prostate) AND Gated = true ...');
+    db.prepare(`INSERT INTO test_values (session_id, test_name, test_slug, value_string, value_numeric, unit, status) VALUES 
+      (?, 'Gated', 'gated', 'false', NULL, NULL, 'OK'),
+      (?, 'Gated', 'gated', 'true', NULL, NULL, 'OK'),
+      (?, 'Gated', 'gated', 'true', NULL, NULL, 'OK')
+    `).run(sProstate, sBreast, sLung);
+    // Note: sProstate is Gated=false, sBreast is Gated=true, sLung is Gated=true.
+    // Query: (Site = Prostate OR Site = Breast) AND Gated = true
+    // Expected: ONLY sBreast (1 point). sProstate is excluded because Gated=false!
+    const bracketedQueryRes = await axios.post(`${base}/query`, {
+      yVariable: 'Gamma Pass Rate (3%/3mm)',
+      units: ['TrueBeam 1'],
+      includeAllInstances: true,
+      filters: {
+        groupLogic: 'and',
+        groups: [
+          {
+            id: 'grp-sites',
+            logic: 'or',
+            conditions: [
+              { testName: 'Site', operator: 'equals', value: 'Prostate' },
+              { testName: 'Site', operator: 'equals', value: 'Breast' }
+            ]
+          },
+          {
+            id: 'grp-gated',
+            logic: 'and',
+            conditions: [
+              { testName: 'Gated', operator: 'equals', value: 'true' }
+            ]
+          }
+        ]
+      }
+    });
+
+    if (bracketedQueryRes.data.matchedPoints !== 1) {
+      throw new Error(`Expected 1 matched point for (Prostate OR Breast) AND Gated=true, got ${bracketedQueryRes.data.matchedPoints}`);
+    }
+    console.log('Verified: Bracketed condition groups correctly resolved (Site = Prostate OR Site = Breast) AND Gated = true (1 point matched)!');
+
+
     console.log('Testing /api/settings/backup and /api/settings/restore...');
     // Seed some specific settings and presets
     db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('qatrack_url', 'http://backup-source.local:8000')").run();
@@ -829,6 +917,66 @@ const server = app.listen(5099, async () => {
     }
 
     console.log('Verified: /api/settings/backup and /api/settings/restore work perfectly!');
+
+    // Test QATrackClient agent lifecycle & resilient socket management
+    console.log('Testing QATrackClient agent reset and socket resilience...');
+    const qc = require('./qatrackClient');
+    const oldHttpAgent = qc.httpAgent;
+    const oldHttpsAgent = qc.httpsAgent;
+    if (!oldHttpAgent || !oldHttpsAgent) {
+      throw new Error('Expected httpAgent and httpsAgent to be initialized');
+    }
+    qc.resetAgents();
+    if (qc.httpAgent === oldHttpAgent || qc.httpsAgent === oldHttpsAgent) {
+      throw new Error('resetAgents did not recreate fresh agents');
+    }
+    console.log('Verified: QATrackClient resets socket agents cleanly on network/socket interruptions!');
+
+    // Test Macro Name (Slug) Disambiguation and Querying
+    console.log('Testing Macro Name (Slug) Disambiguation and Slug Querying...');
+    db.exec(`
+      INSERT INTO test_definitions (name, slug, test_list_name, unit, is_numeric)
+      VALUES ('Output Diff (%)', 'output_diff_kv', 'Test List KV', '%', 1);
+
+      INSERT INTO sessions (id, unit_name, test_list_name, work_completed, status)
+      VALUES (9901, 'LA10', 'Test List KV', '2026-02-01 10:00:00', 'Approved');
+
+      INSERT INTO test_values (session_id, test_name, test_slug, value_numeric, unit)
+      VALUES (9901, 'Output Diff (%)', 'output_diff_kv', 0.85, '%');
+    `);
+
+    const schemaTestsRes = await axios.get(`${base}/schema/tests`);
+    const kvMatch = schemaTestsRes.data.find(t => t.slug === 'output_diff_kv');
+    if (!kvMatch) {
+      throw new Error('Expected /api/schema/tests to include test with slug output_diff_kv');
+    }
+    if (kvMatch.name !== 'Output Diff (%)') {
+      throw new Error(`Expected test name 'Output Diff (%)', got '${kvMatch.name}'`);
+    }
+
+    // Query by macro slug
+    const queryBySlugRes = await axios.post(`${base}/query`, {
+      yVariable: 'output_diff_kv',
+      includeAllInstances: true
+    });
+    if (queryBySlugRes.data.matchedPoints !== 1) {
+      throw new Error(`Expected 1 point when querying by slug 'output_diff_kv', got ${queryBySlugRes.data.matchedPoints}`);
+    }
+    const slugRow = queryBySlugRes.data.tableRows[0];
+    if (slugRow['output_diff_kv'] !== 0.85 && slugRow['Output Diff (%)'] !== 0.85) {
+      throw new Error('Expected tableRow to have value mapped by slug and display name');
+    }
+
+    // Query by display name (backwards compatible)
+    const queryByNameRes = await axios.post(`${base}/query`, {
+      yVariable: 'Output Diff (%)',
+      includeAllInstances: true
+    });
+    if (queryByNameRes.data.matchedPoints !== 1) {
+      throw new Error(`Expected 1 point when querying by display name, got ${queryByNameRes.data.matchedPoints}`);
+    }
+
+    console.log('Verified: Tests return macro slug, and /api/query queries accurately by slug or display name!');
 
     console.log('ALL API TESTS PASSED SUCCESSFULLY!');
   } catch (err) {

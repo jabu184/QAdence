@@ -7,7 +7,7 @@ if (!fs.existsSync(dataDir)) {
   fs.mkdirSync(dataDir, { recursive: true });
 }
 
-const dbPath = path.join(dataDir, 'patient_qa.db');
+const dbPath = process.env.DB_PATH || path.join(dataDir, 'patient_qa.db');
 const db = new Database(dbPath);
 
 // Enable WAL mode for high performance concurrent reads
@@ -46,6 +46,7 @@ db.exec(`
   );
 
   CREATE INDEX IF NOT EXISTS idx_test_def_name ON test_definitions(name);
+  CREATE INDEX IF NOT EXISTS idx_test_def_slug ON test_definitions(slug);
   CREATE INDEX IF NOT EXISTS idx_test_def_list ON test_definitions(test_list_name);
 
   CREATE TABLE IF NOT EXISTS unit_test_collections (
@@ -67,6 +68,7 @@ db.exec(`
     unit_id INTEGER,
     unit_name TEXT NOT NULL,
     test_list_name TEXT NOT NULL,
+    work_started DATETIME,
     work_completed DATETIME NOT NULL,
     created_by TEXT,
     status TEXT,
@@ -96,8 +98,10 @@ db.exec(`
 
   CREATE INDEX IF NOT EXISTS idx_test_values_session ON test_values(session_id);
   CREATE INDEX IF NOT EXISTS idx_test_values_name ON test_values(test_name);
+  CREATE INDEX IF NOT EXISTS idx_test_values_slug ON test_values(test_slug);
   CREATE INDEX IF NOT EXISTS idx_test_values_numeric ON test_values(value_numeric);
   CREATE INDEX IF NOT EXISTS idx_test_values_name_sess ON test_values(test_name, session_id);
+  CREATE INDEX IF NOT EXISTS idx_test_values_slug_sess ON test_values(test_slug, session_id);
   CREATE INDEX IF NOT EXISTS idx_sessions_unit ON sessions(unit_name);
   CREATE INDEX IF NOT EXISTS idx_sessions_date ON sessions(work_completed);
   CREATE INDEX IF NOT EXISTS idx_sessions_test_list ON sessions(test_list_name);
@@ -184,6 +188,11 @@ try {
   }
   if (!sessCols.includes('modified_at')) {
     db.exec("ALTER TABLE sessions ADD COLUMN modified_at DATETIME");
+  }
+  if (!sessCols.includes('work_started')) {
+    db.exec("ALTER TABLE sessions ADD COLUMN work_started DATETIME");
+    db.exec("UPDATE sessions SET work_started = work_completed WHERE work_started IS NULL");
+    db.exec("CREATE INDEX IF NOT EXISTS idx_sessions_work_started ON sessions(work_started)");
   }
 } catch (e) {
   console.warn('Migration warning:', e.message);

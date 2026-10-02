@@ -7,9 +7,11 @@ export default function BoxWhiskerPlot({
   datasetResults = {},
   ignoredSessionIds = [],
   yVariable,
+  yVariableLabel,
   baselineConfig,
   onInspectSession
 }) {
+  const displayYName = yVariableLabel || yVariable;
   const [hoveredData, setHoveredData] = useState(null);
   const [tooltipPos, setTooltipPos] = useState({ x: 0, y: 0 });
 
@@ -142,7 +144,7 @@ export default function BoxWhiskerPlot({
               Box & Whisker Distribution Comparison
             </h3>
             <span style={{ fontSize: '0.76rem', color: '#64748b' }}>
-              Side-by-side distribution quartiles & outliers for {yVariable}
+              Side-by-side distribution quartiles & outliers for {displayYName}
             </span>
           </div>
         </div>
@@ -226,7 +228,7 @@ export default function BoxWhiskerPlot({
             fill="#475569"
             fontFamily="sans-serif"
           >
-            {yVariable}
+            {displayYName}
           </text>
 
           {/* Left Axis Line */}

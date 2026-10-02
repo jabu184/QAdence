@@ -2,6 +2,7 @@ import React, { useState, useEffect, useMemo } from 'react';
 import { Filter, Plus, Trash2, Sliders, Layers, BarChart2, TrendingUp, ScatterChart as ScatterIcon, PieChart, Sparkles, Activity } from 'lucide-react';
 import { groupTestsByList } from '../utils/testGrouping';
 import SearchableVariableSelect from './SearchableVariableSelect';
+import { normalizeFilterGroups } from '../utils/filterUtils';
 
 export default function FilterControls({
   units = [],
@@ -45,7 +46,8 @@ export default function FilterControls({
       return {
         name: u.name,
         unitClass: u.unitClass || 'General',
-        unitType: u.unitType || ''
+        unitType: u.unitType || '',
+        active: u.active !== undefined ? u.active : 1
       };
     });
   }, [units]);
@@ -73,11 +75,16 @@ export default function FilterControls({
     return normalizedUnits.filter(u => u.unitClass === selectedUnitClass);
   }, [normalizedUnits, selectedUnitClass]);
 
+  // Clear cached categorical test values whenever tests metadata updates (e.g. after sync)
+  useEffect(() => {
+    setTestValuesCache({});
+  }, [tests]);
+
   // Helper to fetch distinct values for a test
   const fetchValuesForTest = async (testName) => {
     if (!testName || testValuesCache[testName]) return;
     try {
-      const res = await fetch(`/api/schema/test-values?test_name=${encodeURIComponent(testName)}`);
+      const res = await fetch(`/api/schema/test-values?test_name=${encodeURIComponent(testName)}&_t=${Date.now()}`, { cache: 'no-store' });
       const data = await res.json();
       setTestValuesCache(prev => ({ ...prev, [testName]: data }));
     } catch (e) {
@@ -85,28 +92,111 @@ export default function FilterControls({
     }
   };
 
-  const handleAddFilter = () => {
-    // Default to the first categorical test if available, or first test
+  const normFilters = useMemo(() => normalizeFilterGroups(filters), [filters]);
+
+  const handleUpdateGroupLogic = (newLogic) => {
+    onChangeFilters({
+      ...normFilters,
+      groupLogic: newLogic
+    });
+  };
+
+  const handleAddGroup = () => {
     const defaultTest = tests.find(t => !t.isNumeric)?.name || tests[0]?.name || 'Site';
     fetchValuesForTest(defaultTest);
-    onChangeFilters([
-      ...filters,
-      { testName: defaultTest, operator: 'equals', value: '', logic: 'and' }
-    ]);
+    const newGroup = {
+      id: `grp-${Date.now()}`,
+      logic: 'and',
+      conditions: [
+        { testName: defaultTest, operator: 'equals', value: '' }
+      ]
+    };
+    onChangeFilters({
+      groupLogic: normFilters.groupLogic || 'and',
+      groups: [...normFilters.groups, newGroup]
+    });
   };
 
-  const handleUpdateFilter = (index, field, val) => {
-    const updated = [...filters];
-    updated[index] = { ...updated[index], [field]: val };
-    if (field === 'testName') {
-      fetchValuesForTest(val);
-      updated[index].value = ''; // reset value when test name changes
+  const handleRemoveGroup = (groupIdx) => {
+    const updatedGroups = normFilters.groups.filter((_, i) => i !== groupIdx);
+    onChangeFilters({
+      groupLogic: normFilters.groupLogic || 'and',
+      groups: updatedGroups
+    });
+  };
+
+  const handleToggleGroupInnerLogic = (groupIdx, logic) => {
+    const updatedGroups = normFilters.groups.map((g, i) => i === groupIdx ? { ...g, logic } : g);
+    onChangeFilters({
+      groupLogic: normFilters.groupLogic || 'and',
+      groups: updatedGroups
+    });
+  };
+
+  const handleAddCondition = (groupIdx = null) => {
+    const defaultTest = tests.find(t => !t.isNumeric)?.name || tests[0]?.name || 'Site';
+    fetchValuesForTest(defaultTest);
+    let updatedGroups = [...normFilters.groups];
+    if (updatedGroups.length === 0) {
+      updatedGroups = [{
+        id: `grp-${Date.now()}`,
+        logic: 'and',
+        conditions: [
+          { testName: defaultTest, operator: 'equals', value: '' }
+        ]
+      }];
+    } else {
+      const targetIdx = groupIdx !== null ? groupIdx : updatedGroups.length - 1;
+      updatedGroups = updatedGroups.map((g, i) => {
+        if (i !== targetIdx) return g;
+        return {
+          ...g,
+          conditions: [
+            ...g.conditions,
+            { testName: defaultTest, operator: 'equals', value: '' }
+          ]
+        };
+      });
     }
-    onChangeFilters(updated);
+    onChangeFilters({
+      groupLogic: normFilters.groupLogic || 'and',
+      groups: updatedGroups
+    });
   };
 
-  const handleRemoveFilter = (index) => {
-    onChangeFilters(filters.filter((_, i) => i !== index));
+  const handleUpdateCondition = (groupIdx, condIdx, field, val) => {
+    const updatedGroups = normFilters.groups.map((g, gi) => {
+      if (gi !== groupIdx) return g;
+      const updatedConds = g.conditions.map((c, ci) => {
+        if (ci !== condIdx) return c;
+        const next = { ...c, [field]: val };
+        if (field === 'testName') {
+          fetchValuesForTest(val);
+          next.value = '';
+        }
+        return next;
+      });
+      return { ...g, conditions: updatedConds };
+    });
+    onChangeFilters({
+      groupLogic: normFilters.groupLogic || 'and',
+      groups: updatedGroups
+    });
+  };
+
+  const handleRemoveCondition = (groupIdx, condIdx) => {
+    const updatedGroups = normFilters.groups.map((g, gi) => {
+      if (gi !== groupIdx) return g;
+      return {
+        ...g,
+        conditions: g.conditions.filter((_, ci) => ci !== condIdx)
+      };
+    }).filter(g => g.conditions.length > 0);
+
+    onChangeFilters({
+      groupLogic: normFilters.groupLogic || 'and',
+      groups: updatedGroups
+    });
   };
 
   const handleSplitFilter = async (testName) => {
@@ -307,135 +397,19 @@ export default function FilterControls({
                         ({unit.unitType})
                       </span>
                     )}
+                    {unit.active === 0 && (
+                      <span style={{
+                        fontSize: '0.65rem',
+                        opacity: active ? 0.9 : 0.6,
+                        color: active ? '#ffffff' : '#64748b',
+                        fontStyle: 'italic'
+                      }}>
+                        (inactive)
+                      </span>
+                    )}
                   </button>
                 );
               })}
-            </div>
-          </div>
-        </div>
-
-        {/* Date Presets & Year Filter */}
-        <div>
-          <label style={{ fontSize: '0.78rem', fontWeight: '700', color: '#475569', textTransform: 'uppercase', display: 'block', marginBottom: '0.4rem' }}>
-            Time Window & Year
-          </label>
-          <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.4rem', alignItems: 'center' }}>
-            <button
-              onClick={() => onChangeDates('', '')}
-              style={{
-                padding: '4px 10px',
-                borderRadius: '6px',
-                fontSize: '0.8rem',
-                background: (!dateFrom && !dateTo) ? '#eff6ff' : '#f8fafc',
-                color: (!dateFrom && !dateTo) ? '#2563eb' : '#64748b',
-                border: '1px solid ' + ((!dateFrom && !dateTo) ? '#2563eb' : '#e2e8f0'),
-                fontWeight: (!dateFrom && !dateTo) ? '600' : 'normal'
-              }}
-            >
-              All Time
-            </button>
-
-            {/* Current Year */}
-            <button
-              onClick={() => {
-                const cy = new Date().getFullYear();
-                onChangeDates(`${cy}-01-01`, `${cy}-12-31`);
-              }}
-              style={{
-                padding: '4px 10px',
-                borderRadius: '6px',
-                fontSize: '0.8rem',
-                background: (dateFrom === `${new Date().getFullYear()}-01-01` && dateTo === `${new Date().getFullYear()}-12-31`) ? '#eff6ff' : '#f8fafc',
-                color: (dateFrom === `${new Date().getFullYear()}-01-01` && dateTo === `${new Date().getFullYear()}-12-31`) ? '#2563eb' : '#64748b',
-                border: '1px solid ' + ((dateFrom === `${new Date().getFullYear()}-01-01` && dateTo === `${new Date().getFullYear()}-12-31`) ? '#2563eb' : '#e2e8f0'),
-                fontWeight: (dateFrom === `${new Date().getFullYear()}-01-01`) ? '600' : 'normal'
-              }}
-            >
-              Current Year ({new Date().getFullYear()})
-            </button>
-
-            {/* Specific Year Selector */}
-            <select
-              value={
-                (dateFrom && dateTo && dateFrom.startsWith(dateFrom.substring(0, 4)) && dateTo.startsWith(dateFrom.substring(0, 4)) && dateFrom.endsWith('-01-01') && dateTo.endsWith('-12-31'))
-                  ? dateFrom.substring(0, 4)
-                  : ''
-              }
-              onChange={(e) => {
-                const yr = e.target.value;
-                if (!yr) {
-                  onChangeDates('', '');
-                } else {
-                  onChangeDates(`${yr}-01-01`, `${yr}-12-31`);
-                }
-              }}
-              style={{
-                padding: '4px 8px',
-                borderRadius: '6px',
-                fontSize: '0.8rem',
-                background: '#ffffff',
-                border: '1px solid #cbd5e1',
-                color: '#334155'
-              }}
-            >
-              <option value="">-- Select Year --</option>
-              {years.map(yr => (
-                <option key={yr} value={yr}>Year {yr}</option>
-              ))}
-            </select>
-
-            {/* 30 & 90 Days */}
-            {[
-              { label: '30 Days', days: 30 },
-              { label: '90 Days', days: 90 }
-            ].map(p => (
-              <button
-                key={p.label}
-                onClick={() => {
-                  const d = new Date();
-                  d.setDate(d.getDate() - p.days);
-                  onChangeDates(d.toISOString().split('T')[0], '');
-                }}
-                style={{
-                  padding: '4px 8px',
-                  borderRadius: '6px',
-                  fontSize: '0.8rem',
-                  background: '#f8fafc',
-                  color: '#64748b',
-                  border: '1px solid #e2e8f0'
-                }}
-              >
-                {p.label}
-              </button>
-            ))}
-
-            {/* Custom Dates Inputs */}
-            <div style={{ display: 'flex', alignItems: 'center', gap: '3px', marginLeft: '0.2rem' }}>
-              <input
-                type="date"
-                value={dateFrom}
-                onChange={(e) => onChangeDates(e.target.value, dateTo)}
-                title="Start Date (From)"
-                style={{
-                  padding: '3px 6px',
-                  borderRadius: '6px',
-                  border: '1px solid #cbd5e1',
-                  fontSize: '0.78rem'
-                }}
-              />
-              <span style={{ fontSize: '0.75rem', color: '#94a3b8' }}>-</span>
-              <input
-                type="date"
-                value={dateTo}
-                onChange={(e) => onChangeDates(dateFrom, e.target.value)}
-                title="End Date (To)"
-                style={{
-                  padding: '3px 6px',
-                  borderRadius: '6px',
-                  border: '1px solid #cbd5e1',
-                  fontSize: '0.78rem'
-                }}
-              />
             </div>
           </div>
         </div>
@@ -443,35 +417,33 @@ export default function FilterControls({
 
       <hr style={{ border: 'none', borderTop: '1px solid #f1f5f9' }} />
 
-      {/* 2. Dynamic Conditional Filters ("Measurements of a particular type") */}
+      {/* 2. Dynamic Conditional Filters with Condition Groups (Bracketed Boolean Logic) */}
       <div>
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '0.6rem' }}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '0.6rem', flexWrap: 'wrap', gap: '8px' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
             <Filter size={16} color="#2563eb" />
             <span style={{ fontSize: '0.85rem', fontWeight: '700', color: '#1e293b' }}>
               Conditional Filters
             </span>
             <span style={{ fontSize: '0.75rem', color: '#64748b' }}>
-              (e.g. Extract measurements where Site = 'Prostate' or Energy = '6MV')
+              (e.g. (Site = Lung OR Site = Bladder) AND Gated = true)
             </span>
           </div>
+
           <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-            {filters.length > 1 && (
+            {normFilters.groups.length > 1 && (
               <div style={{ display: 'flex', alignItems: 'center', gap: '4px', fontSize: '0.75rem', background: '#f1f5f9', padding: '2px 6px', borderRadius: '6px' }}>
-                <span style={{ color: '#64748b', fontWeight: '600' }}>Match:</span>
+                <span style={{ color: '#64748b', fontWeight: '600' }}>Between Groups:</span>
                 <button
                   type="button"
-                  onClick={() => {
-                    const updated = filters.map((f, i) => i === 0 ? f : { ...f, logic: 'and' });
-                    onChangeFilters(updated);
-                  }}
-                  title="Require ALL conditions to be met (AND logic)"
+                  onClick={() => handleUpdateGroupLogic('and')}
+                  title="Require ALL condition groups to match (AND)"
                   style={{
                     padding: '2px 7px',
                     borderRadius: '4px',
                     border: 'none',
-                    background: filters.slice(1).every(f => (f.logic || 'and').toLowerCase() === 'and') ? '#2563eb' : 'transparent',
-                    color: filters.slice(1).every(f => (f.logic || 'and').toLowerCase() === 'and') ? '#ffffff' : '#475569',
+                    background: normFilters.groupLogic !== 'or' ? '#2563eb' : 'transparent',
+                    color: normFilters.groupLogic !== 'or' ? '#ffffff' : '#475569',
                     fontSize: '0.72rem',
                     fontWeight: '700',
                     cursor: 'pointer'
@@ -481,17 +453,14 @@ export default function FilterControls({
                 </button>
                 <button
                   type="button"
-                  onClick={() => {
-                    const updated = filters.map((f, i) => i === 0 ? f : { ...f, logic: 'or' });
-                    onChangeFilters(updated);
-                  }}
-                  title="Require ANY condition to be met (OR logic)"
+                  onClick={() => handleUpdateGroupLogic('or')}
+                  title="Require ANY condition group to match (OR)"
                   style={{
                     padding: '2px 7px',
                     borderRadius: '4px',
                     border: 'none',
-                    background: filters.slice(1).every(f => (f.logic || 'and').toLowerCase() === 'or') ? '#7c3aed' : 'transparent',
-                    color: filters.slice(1).every(f => (f.logic || 'and').toLowerCase() === 'or') ? '#ffffff' : '#475569',
+                    background: normFilters.groupLogic === 'or' ? '#7c3aed' : 'transparent',
+                    color: normFilters.groupLogic === 'or' ? '#ffffff' : '#475569',
                     fontSize: '0.72rem',
                     fontWeight: '700',
                     cursor: 'pointer'
@@ -501,6 +470,7 @@ export default function FilterControls({
                 </button>
               </div>
             )}
+
             {onRunQuery && isConfigStale && (
               <button
                 type="button"
@@ -524,8 +494,10 @@ export default function FilterControls({
                 ● Apply Filters
               </button>
             )}
+
             <button
-              onClick={handleAddFilter}
+              type="button"
+              onClick={() => handleAddCondition()}
               style={{
                 display: 'flex',
                 alignItems: 'center',
@@ -540,193 +512,450 @@ export default function FilterControls({
                 cursor: 'pointer'
               }}
             >
-              <Plus size={14} /> Add Condition Filter
+              <Plus size={14} /> Add Condition
+            </button>
+
+            <button
+              type="button"
+              onClick={handleAddGroup}
+              title="Add a separate bracketed group of conditions"
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: '4px',
+                padding: '4px 8px',
+                borderRadius: '6px',
+                background: '#f5f3ff',
+                color: '#7c3aed',
+                fontSize: '0.8rem',
+                fontWeight: '600',
+                border: '1px solid #ddd6fe',
+                cursor: 'pointer'
+              }}
+            >
+              <Plus size={14} /> Add Group (Bracket)
             </button>
           </div>
         </div>
 
-        {filters.length === 0 ? (
+        {normFilters.groups.length === 0 ? (
           <div style={{
-            padding: '0.75rem',
+            padding: '0.85rem',
             background: '#f8fafc',
             borderRadius: '8px',
             border: '1px dashed #cbd5e1',
             fontSize: '0.8rem',
             color: '#64748b',
-            textAlign: 'center'
+            textAlign: 'center',
+            display: 'flex',
+            flexDirection: 'column',
+            alignItems: 'center',
+            gap: '0.5rem'
           }}>
-            No condition filters active. Showing all measurement sessions. Click <strong>"+ Add Condition Filter"</strong> to filter by Site, Delivery Technique, Beam Energy, etc.
+            <div>
+              No condition filters active. Showing all measurement sessions.
+            </div>
+            <div style={{ display: 'flex', gap: '8px' }}>
+              <button
+                type="button"
+                onClick={() => handleAddCondition()}
+                style={{
+                  padding: '4px 10px',
+                  borderRadius: '6px',
+                  background: '#eff6ff',
+                  color: '#2563eb',
+                  border: '1px solid #bfdbfe',
+                  fontSize: '0.78rem',
+                  fontWeight: '600',
+                  cursor: 'pointer'
+                }}
+              >
+                + Add Condition Filter
+              </button>
+              <button
+                type="button"
+                onClick={handleAddGroup}
+                style={{
+                  padding: '4px 10px',
+                  borderRadius: '6px',
+                  background: '#f5f3ff',
+                  color: '#7c3aed',
+                  border: '1px solid #ddd6fe',
+                  fontSize: '0.78rem',
+                  fontWeight: '600',
+                  cursor: 'pointer'
+                }}
+              >
+                + Add Bracket Group
+              </button>
+            </div>
           </div>
         ) : (
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
-            {filters.map((f, idx) => {
-              const knownValues = testValuesCache[f.testName] || [];
-              const isOr = (f.logic || 'and').toLowerCase() === 'or';
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
+            {normFilters.groups.map((group, groupIdx) => {
+              const isGroupOr = group.logic.toLowerCase() === 'or';
+              const isTopOr = (normFilters.groupLogic || 'and').toLowerCase() === 'or';
+
               return (
-                <div
-                  key={idx}
-                  style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: '0.5rem',
-                    background: '#f8fafc',
-                    padding: '6px 10px',
-                    borderRadius: '8px',
-                    border: '1px solid #e2e8f0',
-                    position: 'relative',
-                    zIndex: filters.length - idx + 10
-                  }}
-                >
-                  {idx === 0 ? (
-                    <span style={{
-                      fontSize: '0.75rem',
-                      fontWeight: '700',
-                      color: '#64748b',
-                      padding: '3px 8px',
-                      background: '#f1f5f9',
-                      borderRadius: '5px',
-                      minWidth: '50px',
-                      textAlign: 'center'
+                <React.Fragment key={group.id || groupIdx}>
+                  {groupIdx > 0 && (
+                    <div style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      gap: '12px',
+                      margin: '0.1rem 0'
                     }}>
-                      WHERE
-                    </span>
-                  ) : (
-                    <button
-                      type="button"
-                      onClick={() => {
-                        const nextLogic = isOr ? 'and' : 'or';
-                        handleUpdateFilter(idx, 'logic', nextLogic);
-                      }}
-                      title="Click to toggle between AND and OR logic"
-                      style={{
-                        fontSize: '0.75rem',
-                        fontWeight: '700',
-                        color: isOr ? '#7c3aed' : '#2563eb',
-                        background: isOr ? '#f5f3ff' : '#eff6ff',
-                        border: isOr ? '1px solid #ddd6fe' : '1px solid #bfdbfe',
-                        padding: '3px 8px',
-                        borderRadius: '5px',
-                        minWidth: '50px',
-                        textAlign: 'center',
-                        cursor: 'pointer',
-                        boxShadow: '0 1px 2px rgba(0,0,0,0.05)',
-                        transition: 'all 0.15s ease'
-                      }}
-                    >
-                      {isOr ? 'OR ⇅' : 'AND ⇅'}
-                    </button>
+                      <div style={{ flex: 1, height: '1px', background: '#e2e8f0' }} />
+                      <button
+                        type="button"
+                        onClick={() => handleUpdateGroupLogic(isTopOr ? 'and' : 'or')}
+                        title="Click to toggle group conjunction between AND and OR"
+                        style={{
+                          fontSize: '0.72rem',
+                          fontWeight: '800',
+                          color: isTopOr ? '#7c3aed' : '#2563eb',
+                          background: isTopOr ? '#f5f3ff' : '#eff6ff',
+                          border: `1px solid ${isTopOr ? '#ddd6fe' : '#bfdbfe'}`,
+                          padding: '2px 10px',
+                          borderRadius: '12px',
+                          cursor: 'pointer',
+                          letterSpacing: '0.5px'
+                        }}
+                      >
+                        {isTopOr ? 'OR (ANY GROUP) ⇅' : 'AND (ALL GROUPS) ⇅'}
+                      </button>
+                      <div style={{ flex: 1, height: '1px', background: '#e2e8f0' }} />
+                    </div>
                   )}
 
-                  {/* Test selector with test list filter and instant search */}
-                  <div style={{ minWidth: '220px', maxWidth: '320px', flex: '1 1 220px' }}>
-                    <SearchableVariableSelect
-                      value={f.testName}
-                      onChange={(name) => handleUpdateFilter(idx, 'testName', name)}
-                      tests={tests}
-                      onlyNumeric={false}
-                      returnStringOnly={true}
-                      compact={true}
-                      includeAllInstances={true}
-                      placeholder="Select test to filter..."
-                    />
-                  </div>
-
-                  {/* Operator */}
-                  <select
-                    value={f.operator}
-                    onChange={(e) => handleUpdateFilter(idx, 'operator', e.target.value)}
+                  <div
                     style={{
-                      padding: '4px 8px',
-                      borderRadius: '6px',
-                      border: '1px solid #cbd5e1',
-                      fontSize: '0.82rem',
-                      background: '#ffffff'
+                      background: '#ffffff',
+                      borderRadius: '8px',
+                      border: normFilters.groups.length > 1 ? '1px solid #cbd5e1' : '1px solid #e2e8f0',
+                      boxShadow: '0 1px 3px rgba(0,0,0,0.02)',
+                      padding: '0.75rem 0.85rem',
+                      display: 'flex',
+                      flexDirection: 'column',
+                      gap: '0.5rem'
                     }}
                   >
-                    <option value="equals">equals (=)</option>
-                    <option value="not_equals">not equals (≠)</option>
-                    <option value="contains">contains</option>
-                    <option value="gt">greater than (&gt;)</option>
-                    <option value="lt">less than (&lt;)</option>
-                  </select>
-
-                  {/* Value field with suggestions */}
-                  {knownValues.length > 0 ? (
-                    <select
-                      value={f.value}
-                      onChange={(e) => handleUpdateFilter(idx, 'value', e.target.value)}
-                      style={{
-                        padding: '4px 8px',
-                        borderRadius: '6px',
-                        border: '1px solid #cbd5e1',
-                        fontSize: '0.82rem',
-                        background: '#ffffff',
-                        minWidth: '140px'
-                      }}
-                    >
-                      <option value="">-- Choose Value --</option>
-                      {knownValues.map(v => (
-                        <option key={v} value={v}>{v}</option>
-                      ))}
-                    </select>
-                  ) : (
-                    <input
-                      type="text"
-                      placeholder="Filter value..."
-                      value={f.value}
-                      onChange={(e) => handleUpdateFilter(idx, 'value', e.target.value)}
-                      style={{
-                        padding: '4px 8px',
-                        borderRadius: '6px',
-                        border: '1px solid #cbd5e1',
-                        fontSize: '0.82rem',
-                        background: '#ffffff',
-                        width: '160px'
-                      }}
-                    />
-                  )}
-
-                  {/* Split into one dataset per value button */}
-                  {onSplitByFilter && (
-                    <button
-                      type="button"
-                      onClick={() => handleSplitFilter(f.testName)}
-                      disabled={splittingTest === f.testName}
-                      title={`Create one dataset for each distinct value of ${f.testName}`}
-                      style={{
-                        display: 'inline-flex',
+                    {/* Group Header (if multiple groups or multiple conditions in group) */}
+                    {(normFilters.groups.length > 1 || group.conditions.length > 1) && (
+                      <div style={{
+                        display: 'flex',
                         alignItems: 'center',
-                        gap: '4px',
-                        padding: '4px 8px',
-                        borderRadius: '6px',
-                        background: '#ecfdf5',
-                        color: '#059669',
-                        border: '1px solid #a7f3d0',
-                        fontSize: '0.76rem',
-                        fontWeight: '600',
-                        cursor: 'pointer',
-                        whiteSpace: 'nowrap'
-                      }}
-                    >
-                      <Sparkles size={13} />
-                      {splittingTest === f.testName ? 'Splitting...' : 'Split by Value'}
-                    </button>
-                  )}
+                        justifyContent: 'space-between',
+                        paddingBottom: '0.35rem',
+                        borderBottom: '1px dashed #f1f5f9'
+                      }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                          <span style={{
+                            fontSize: '0.74rem',
+                            fontWeight: '800',
+                            color: '#334155',
+                            background: '#f1f5f9',
+                            padding: '1px 7px',
+                            borderRadius: '4px',
+                            fontFamily: 'monospace'
+                          }}>
+                            ( Group {groupIdx + 1} )
+                          </span>
+                          {normFilters.groups.length > 1 && (
+                            <span style={{ fontSize: '0.72rem', color: '#64748b' }}>
+                              Bracketed {group.conditions.length > 1 ? `(${group.logic.toUpperCase()})` : ''}
+                            </span>
+                          )}
+                        </div>
 
-                  <button
-                    onClick={() => handleRemoveFilter(idx)}
-                    title="Remove Filter"
-                    style={{
-                      padding: '4px',
-                      color: '#ef4444',
-                      borderRadius: '4px'
-                    }}
-                  >
-                    <Trash2 size={16} />
-                  </button>
-                </div>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                          {group.conditions.length > 1 && (
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '4px', fontSize: '0.72rem', background: '#f8fafc', padding: '1px 5px', borderRadius: '5px', border: '1px solid #e2e8f0' }}>
+                              <span style={{ color: '#64748b', fontWeight: '600' }}>Match:</span>
+                              <button
+                                type="button"
+                                onClick={() => handleToggleGroupInnerLogic(groupIdx, 'and')}
+                                title="Require ALL conditions inside this bracket to match (AND)"
+                                style={{
+                                  padding: '1px 6px',
+                                  borderRadius: '3px',
+                                  border: 'none',
+                                  background: !isGroupOr ? '#2563eb' : 'transparent',
+                                  color: !isGroupOr ? '#ffffff' : '#64748b',
+                                  fontSize: '0.7rem',
+                                  fontWeight: '700',
+                                  cursor: 'pointer'
+                                }}
+                              >
+                                ALL (AND)
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => handleToggleGroupInnerLogic(groupIdx, 'or')}
+                                title="Require ANY condition inside this bracket to match (OR)"
+                                style={{
+                                  padding: '1px 6px',
+                                  borderRadius: '3px',
+                                  border: 'none',
+                                  background: isGroupOr ? '#7c3aed' : 'transparent',
+                                  color: isGroupOr ? '#ffffff' : '#64748b',
+                                  fontSize: '0.7rem',
+                                  fontWeight: '700',
+                                  cursor: 'pointer'
+                                }}
+                              >
+                                ANY (OR)
+                              </button>
+                            </div>
+                          )}
+
+                          <button
+                            type="button"
+                            onClick={() => handleRemoveGroup(groupIdx)}
+                            title="Remove entire group"
+                            style={{
+                              padding: '2px 6px',
+                              color: '#ef4444',
+                              background: '#fef2f2',
+                              border: '1px solid #fecaca',
+                              borderRadius: '4px',
+                              fontSize: '0.7rem',
+                              fontWeight: '600',
+                              cursor: 'pointer',
+                              display: 'flex',
+                              alignItems: 'center',
+                              gap: '3px'
+                            }}
+                          >
+                            <Trash2 size={12} /> Delete Group
+                          </button>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Conditions in Group */}
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '0.45rem' }}>
+                      {group.conditions.map((f, condIdx) => {
+                        const knownValues = testValuesCache[f.testName] || [];
+
+                        return (
+                          <div
+                            key={condIdx}
+                            style={{
+                              display: 'flex',
+                              alignItems: 'center',
+                              gap: '0.5rem',
+                              background: '#f8fafc',
+                              padding: '6px 10px',
+                              borderRadius: '8px',
+                              border: '1px solid #e2e8f0',
+                              position: 'relative',
+                              zIndex: (normFilters.groups.length - groupIdx) * 10 + (group.conditions.length - condIdx)
+                            }}
+                          >
+                            {condIdx === 0 ? (
+                              <span style={{
+                                fontSize: '0.75rem',
+                                fontWeight: '700',
+                                color: '#64748b',
+                                padding: '3px 8px',
+                                background: '#f1f5f9',
+                                borderRadius: '5px',
+                                minWidth: '50px',
+                                textAlign: 'center'
+                              }}>
+                                WHERE
+                              </span>
+                            ) : (
+                              <button
+                                type="button"
+                                onClick={() => handleToggleGroupInnerLogic(groupIdx, isGroupOr ? 'and' : 'or')}
+                                title="Click to toggle group match between AND and OR"
+                                style={{
+                                  fontSize: '0.75rem',
+                                  fontWeight: '700',
+                                  color: isGroupOr ? '#7c3aed' : '#2563eb',
+                                  background: isGroupOr ? '#f5f3ff' : '#eff6ff',
+                                  border: isGroupOr ? '1px solid #ddd6fe' : '1px solid #bfdbfe',
+                                  padding: '3px 8px',
+                                  borderRadius: '5px',
+                                  minWidth: '50px',
+                                  textAlign: 'center',
+                                  cursor: 'pointer',
+                                  boxShadow: '0 1px 2px rgba(0,0,0,0.05)',
+                                  transition: 'all 0.15s ease'
+                                }}
+                              >
+                                {isGroupOr ? 'OR ⇅' : 'AND ⇅'}
+                              </button>
+                            )}
+
+                            {/* Test selector with test list filter and instant search */}
+                            <div style={{ minWidth: '220px', maxWidth: '320px', flex: '1 1 220px' }}>
+                              <SearchableVariableSelect
+                                value={f.testName}
+                                onChange={(name) => handleUpdateCondition(groupIdx, condIdx, 'testName', name)}
+                                tests={tests}
+                                onlyNumeric={false}
+                                returnStringOnly={true}
+                                compact={true}
+                                includeAllInstances={true}
+                                placeholder="Select test to filter..."
+                              />
+                            </div>
+
+                            {/* Operator */}
+                            <select
+                              value={f.operator}
+                              onChange={(e) => handleUpdateCondition(groupIdx, condIdx, 'operator', e.target.value)}
+                              style={{
+                                padding: '4px 8px',
+                                borderRadius: '6px',
+                                border: '1px solid #cbd5e1',
+                                fontSize: '0.82rem',
+                                background: '#ffffff'
+                              }}
+                            >
+                              <option value="equals">equals (=)</option>
+                              <option value="not_equals">not equals (≠)</option>
+                              <option value="contains">contains</option>
+                              <option value="gt">greater than (&gt;)</option>
+                              <option value="lt">less than (&lt;)</option>
+                            </select>
+
+                            {/* Value field with suggestions */}
+                            {knownValues.length > 0 ? (
+                              <select
+                                value={f.value}
+                                onChange={(e) => handleUpdateCondition(groupIdx, condIdx, 'value', e.target.value)}
+                                style={{
+                                  padding: '4px 8px',
+                                  borderRadius: '6px',
+                                  border: '1px solid #cbd5e1',
+                                  fontSize: '0.82rem',
+                                  background: '#ffffff',
+                                  minWidth: '140px'
+                                }}
+                              >
+                                <option value="">-- Choose Value --</option>
+                                {knownValues.map(v => (
+                                  <option key={v} value={v}>{v}</option>
+                                ))}
+                              </select>
+                            ) : (
+                              <input
+                                type="text"
+                                placeholder="Filter value..."
+                                value={f.value}
+                                onChange={(e) => handleUpdateCondition(groupIdx, condIdx, 'value', e.target.value)}
+                                style={{
+                                  padding: '4px 8px',
+                                  borderRadius: '6px',
+                                  border: '1px solid #cbd5e1',
+                                  fontSize: '0.82rem',
+                                  background: '#ffffff',
+                                  width: '160px'
+                                }}
+                              />
+                            )}
+
+                            {/* Split into one dataset per value button */}
+                            {onSplitByFilter && (
+                              <button
+                                type="button"
+                                onClick={() => handleSplitFilter(f.testName)}
+                                disabled={splittingTest === f.testName}
+                                title={`Create one dataset for each distinct value of ${f.testName}`}
+                                style={{
+                                  display: 'inline-flex',
+                                  alignItems: 'center',
+                                  gap: '4px',
+                                  padding: '4px 8px',
+                                  borderRadius: '6px',
+                                  background: '#ecfdf5',
+                                  color: '#059669',
+                                  border: '1px solid #a7f3d0',
+                                  fontSize: '0.76rem',
+                                  fontWeight: '600',
+                                  cursor: 'pointer',
+                                  whiteSpace: 'nowrap'
+                                }}
+                              >
+                                <Sparkles size={13} />
+                                {splittingTest === f.testName ? 'Splitting...' : 'Split by Value'}
+                              </button>
+                            )}
+
+                            <button
+                              type="button"
+                              onClick={() => handleRemoveCondition(groupIdx, condIdx)}
+                              title="Remove condition"
+                              style={{
+                                padding: '4px',
+                                color: '#ef4444',
+                                borderRadius: '4px',
+                                border: 'none',
+                                background: 'transparent',
+                                cursor: 'pointer'
+                              }}
+                            >
+                              <Trash2 size={16} />
+                            </button>
+                          </div>
+                        );
+                      })}
+                    </div>
+
+                    {/* Group Footer: Add Condition inside this Group */}
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginTop: '0.2rem' }}>
+                      <button
+                        type="button"
+                        onClick={() => handleAddCondition(groupIdx)}
+                        style={{
+                          display: 'inline-flex',
+                          alignItems: 'center',
+                          gap: '3px',
+                          padding: '3px 8px',
+                          borderRadius: '4px',
+                          background: '#f1f5f9',
+                          color: '#2563eb',
+                          fontSize: '0.74rem',
+                          fontWeight: '600',
+                          border: '1px dashed #cbd5e1',
+                          cursor: 'pointer'
+                        }}
+                      >
+                        <Plus size={12} /> Add Condition in Group
+                      </button>
+                    </div>
+                  </div>
+                </React.Fragment>
               );
             })}
+
+            {/* Bottom Add Group Button */}
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginTop: '0.25rem' }}>
+              <button
+                type="button"
+                onClick={handleAddGroup}
+                style={{
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: '5px',
+                  padding: '5px 12px',
+                  borderRadius: '6px',
+                  background: '#f5f3ff',
+                  color: '#7c3aed',
+                  fontSize: '0.78rem',
+                  fontWeight: '700',
+                  border: '1px dashed #c4b5fd',
+                  cursor: 'pointer'
+                }}
+              >
+                <Plus size={14} /> Add Condition Group (Bracket)
+              </button>
+            </div>
           </div>
         )}
       </div>

@@ -4,9 +4,29 @@ const axios = require('axios');
 const db = require('./db');
 
 class QATrackClient {
+  createAgents() {
+    return {
+      httpAgent: new http.Agent({
+        keepAlive: false
+      }),
+      httpsAgent: new https.Agent({
+        keepAlive: false
+      })
+    };
+  }
+
+  resetAgents() {
+    try { if (this.httpAgent) this.httpAgent.destroy(); } catch (_) {}
+    try { if (this.httpsAgent) this.httpsAgent.destroy(); } catch (_) {}
+    const agents = this.createAgents();
+    this.httpAgent = agents.httpAgent;
+    this.httpsAgent = agents.httpsAgent;
+  }
+
   constructor() {
-    this.httpAgent = new http.Agent({ keepAlive: true, keepAliveMsecs: 30000, timeout: 120000 });
-    this.httpsAgent = new https.Agent({ keepAlive: true, keepAliveMsecs: 30000, timeout: 120000 });
+    const agents = this.createAgents();
+    this.httpAgent = agents.httpAgent;
+    this.httpsAgent = agents.httpsAgent;
     this.cachedMetadata = null;
     this.userMap = new Map();
     this.commentMap = new Map();
@@ -116,7 +136,10 @@ class QATrackClient {
   getHeaders() {
     const headers = {
       'Accept': 'application/json',
-      'Content-Type': 'application/json'
+      'Content-Type': 'application/json',
+      'Cache-Control': 'no-cache, no-store',
+      'Pragma': 'no-cache',
+      'Connection': 'close'
     };
 
     if (this.token) {
@@ -162,14 +185,14 @@ class QATrackClient {
     }
   }
 
-  async fetchAllPages(endpointUrl, params = {}, onPage = null) {
+  async fetchAllPages(endpointUrl, params = {}, onPage = null, maxPages = 10000) {
     let url = endpointUrl.startsWith('http') ? endpointUrl : `${this.baseUrl}${endpointUrl.startsWith('/') ? '' : '/'}${endpointUrl}`;
     let allResults = [];
     let page = 1;
     let hasNext = true;
 
-    // Safety ceiling increased to 10,000 pages (~100,000 records) to prevent infinite loops
-    while (hasNext && page <= 10000) {
+    // Safety ceiling to prevent infinite loops
+    while (hasNext && page <= maxPages) {
       if (this.syncStatus.isCancelled) {
         break;
       }
@@ -202,6 +225,8 @@ class QATrackClient {
                                     (err.response && [502, 503, 504].includes(err.response.status));
 
           if (retries > 0 && isSocketOrTimeout && !this.syncStatus.isCancelled) {
+            // Destroy dead socket pool to force a fresh TCP connection on retry
+            this.resetAgents();
             const delaySec = (4 - retries) * 2;
             this.syncStatus.stage = `Network/socket timeout on page ${page}. Retrying in ${delaySec}s (attempt ${4 - retries}/3)...`;
             this.updateMemoryStats();
@@ -470,11 +495,11 @@ class QATrackClient {
     }
     this.userMap = userMap;
 
-    // 0b. Fetch Comments for clean comment resolution
+    // 0b. Fetch Comments for clean comment resolution (capped to recent comments)
     let comments = [];
     try {
       if (endpoints.commentsUrl) {
-        comments = await this.fetchAllPages(endpoints.commentsUrl);
+        comments = await this.fetchAllPages(endpoints.commentsUrl, { ordering: '-id' }, null, 2);
       }
     } catch (_) {}
     const commentMap = new Map();
@@ -667,9 +692,6 @@ class QATrackClient {
     for (const uti of unitTestInfos) {
       const isUtiActive = (uti.is_active !== undefined) ? Boolean(uti.is_active) : ((uti.active !== undefined) ? Boolean(uti.active) : true);
       const utiUnitId = uti.unit ? (typeof uti.unit === 'number' ? uti.unit : this.extractIdFromUrl(uti.unit)) : null;
-      if (!isUtiActive || (utiUnitId && !activeUnitIds.has(utiUnitId))) {
-        continue; // Skip non-active unit test infos
-      }
 
       const id = uti.id || this.extractIdFromUrl(uti.url);
       const testDef = testDefMap.get(uti.test) || (uti.test && testDefMap.get(this.extractIdFromUrl(uti.test)));
@@ -788,7 +810,7 @@ class QATrackClient {
 
     let collections = [];
     try {
-      collections = await this.fetchAllPages(endpoints.unitTestCollectionsUrl);
+      collections = await this.fetchAllPages(endpoints.unitTestCollectionsUrl, { ordering: '-id' });
     } catch (e) {
       console.warn('Warning: Could not fetch unit test collections:', e.message);
     }
@@ -826,10 +848,9 @@ class QATrackClient {
         testListName = 'Unknown Test List';
       }
 
-      // Check whether assignment is active AND assigned unit is active
+      // Preserve true assignment active status
       const isUtcActive = (c.active !== undefined) ? Boolean(c.active) : ((c.is_active !== undefined) ? Boolean(c.is_active) : true);
-      const isUnitActive = (uId && activeUnitIds.has(uId)) || (rawUnit && activeUnitIds.has(rawUnit)) || (unitName && activeUnitNames.has(unitName.toLowerCase().trim()));
-      const isAssignmentActive = (isUtcActive && isUnitActive) ? 1 : 0;
+      const isAssignmentActive = isUtcActive ? 1 : 0;
 
       if (id) {
         try {
@@ -1483,6 +1504,9 @@ class QATrackClient {
 
   async syncMetadata(options = {}) {
     this.reloadConfig();
+    this.cachedMetadata = null;
+    this.userMap.clear();
+    this.commentMap.clear();
     const startTime = Date.now();
     this.syncStatus = {
       isRunning: true,
@@ -1524,7 +1548,7 @@ class QATrackClient {
   async syncOnDemand(options = {}) {
     this.reloadConfig();
     const startTime = Date.now();
-    const { testListName, testListNames, unitName, unitNames, dateFrom, dateTo, limit = 5000 } = options;
+    const { testListName, testListNames, unitName, unitNames, dateFrom, dateTo, limit = null } = options;
     const effectiveIncludeUnapproved = options.includeUnapproved !== undefined ? Boolean(options.includeUnapproved) : this.includeUnapproved;
     const effectiveIncludeRejected = options.includeRejected !== undefined ? Boolean(options.includeRejected) : this.includeRejected;
     const targetLists = (Array.isArray(testListNames) ? testListNames : (testListName ? [testListName] : [])).filter(Boolean);
@@ -1548,80 +1572,16 @@ class QATrackClient {
     try {
       const endpoints = await this.discoverEndpoints();
 
-      let unitMap = new Map();
-      let testListMap = new Map();
-      let utiMap = new Map();
-      let utcMap = new Map();
-      let testDefMap = this.cachedMetadata?.testDefMap || null;
-
-      if (this.cachedMetadata) {
-        unitMap = this.cachedMetadata.unitMap;
-        testListMap = this.cachedMetadata.testListMap;
-        utiMap = this.cachedMetadata.utiMap;
-        utcMap = this.cachedMetadata.utcMap;
-        testDefMap = this.cachedMetadata.testDefMap;
+      // Fetch fresh metadata from QATrack+ unless explicitly bypassed, ensuring that newly
+      // created test lists, test definitions, and machine assignments are never missed.
+      let meta;
+      if (options.refreshMetadata !== false || !this.cachedMetadata) {
+        meta = await this.fetchMetadata(endpoints, false);
+        this.cachedMetadata = meta;
       } else {
-        const dbUnits = db.prepare('SELECT id, name FROM units').all();
-        const dbLists = db.prepare('SELECT id, name FROM test_lists').all();
-        let dbUtcs = [];
-        try {
-          dbUtcs = db.prepare(`
-            SELECT id, unit_name, test_list_name, unit_id, test_list_id, active
-            FROM unit_test_collections
-          `).all();
-        } catch (_) {}
-
-        for (const u of dbUnits) {
-          unitMap.set(u.id, u.name);
-          unitMap.set(String(u.id), u.name);
-          unitMap.set(u.name.toLowerCase().trim(), u.name);
-          unitMap.set(u.name.toLowerCase().replace(/[\s-_]/g, ''), u.name);
-        }
-        for (const l of dbLists) {
-          testListMap.set(l.id, l.name);
-          testListMap.set(String(l.id), l.name);
-        }
-        for (const c of dbUtcs) {
-          const colInfo = {
-            unitName: c.unit_name,
-            testListName: c.test_list_name,
-            unitId: c.unit_id,
-            testListId: c.test_list_id,
-            active: Boolean(c.active !== 0)
-          };
-          utcMap.set(c.id, colInfo);
-          utcMap.set(String(c.id), colInfo);
-        }
-
-        utiMap = await this.getOrLoadUtiMap(endpoints);
-
-        // If local metadata is missing units, test lists, collections, or UTIs, do a metadata fetch once
-        const dbUtiCount = db.prepare('SELECT COUNT(*) as count FROM unit_test_infos').get()?.count || 0;
-        if (dbUnits.length === 0 || dbLists.length === 0 || dbUtcs.length === 0 || dbUtiCount === 0 || utiMap.size === 0) {
-          const meta = await this.fetchMetadata(endpoints, false);
-          this.cachedMetadata = meta;
-          unitMap = meta.unitMap;
-          testListMap = meta.testListMap;
-          utiMap = meta.utiMap;
-          utcMap = meta.utcMap;
-          testDefMap = meta.testDefMap;
-        } else {
-          testDefMap = new Map();
-          try {
-            const dbDefs = db.prepare('SELECT id, name, slug, unit, data_type, is_numeric FROM test_definitions').all();
-            for (const d of dbDefs) {
-              const info = { id: d.id, name: d.name, slug: d.slug, unit: d.unit, type: d.data_type, is_numeric: d.is_numeric === 1 };
-              if (d.id) {
-                testDefMap.set(d.id, info);
-                testDefMap.set(String(d.id), info);
-              }
-              if (d.slug) testDefMap.set(d.slug, info);
-              if (d.name) testDefMap.set(d.name, info);
-            }
-          } catch (_) {}
-          this.cachedMetadata = { unitMap, testListMap, utiMap, utcMap, testDefMap };
-        }
+        meta = this.cachedMetadata;
       }
+      const { unitMap, testListMap, utiMap, utcMap, testDefMap } = meta;
 
       const testInstanceStatusMap = await this.getOrLoadTestInstanceStatusMap(endpoints);
       const activeUnitRows = db.prepare('SELECT id, name FROM units WHERE active = 1').all();
@@ -1629,11 +1589,12 @@ class QATrackClient {
 
       // Ingestion helpers
       const insertSession = db.prepare(`
-        INSERT INTO sessions (qatrack_instance_id, unit_id, unit_name, test_list_name, work_completed, created_by, status, comments, reviewed_by, reviewed_at, modified_by, modified_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO sessions (qatrack_instance_id, unit_id, unit_name, test_list_name, work_started, work_completed, created_by, status, comments, reviewed_by, reviewed_at, modified_by, modified_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(qatrack_instance_id) DO UPDATE SET
           unit_name = excluded.unit_name,
           test_list_name = excluded.test_list_name,
+          work_started = excluded.work_started,
           work_completed = excluded.work_completed,
           created_by = excluded.created_by,
           status = excluded.status,
@@ -1681,18 +1642,21 @@ class QATrackClient {
 
           // Determine session status
           let sessionStatus = 'Completed';
+          const resolvedInstStatus = inst.status ? this.resolveTestInstanceStatus(inst, testInstanceStatusMap) : null;
           if (inst.status_name) {
             sessionStatus = inst.status_name;
-          } else if (typeof inst.status === 'string' && inst.status.trim() && !inst.status.startsWith('http')) {
+          } else if (resolvedInstStatus?.name && resolvedInstStatus.name !== 'Approved' && resolvedInstStatus.name !== 'Unreviewed') {
+            sessionStatus = resolvedInstStatus.name;
+          } else if (typeof inst.status === 'string' && inst.status.trim() && !inst.status.startsWith('http') && isNaN(Number(inst.status))) {
             sessionStatus = inst.status.trim();
-          } else if (allRejectedTi) {
+          } else if (resolvedInstStatus?.isRejected || allRejectedTi) {
             sessionStatus = 'Rejected';
           } else if (inst.in_progress) {
             sessionStatus = 'In Progress';
-          } else if (inst.all_reviewed === false || hasUnreviewedTi) {
-            sessionStatus = 'Unapproved';
-          } else if (inst.all_reviewed) {
+          } else if (inst.all_reviewed === true || (!resolvedInstStatus?.requiresReview && !hasUnreviewedTi && inst.all_reviewed !== false)) {
             sessionStatus = 'Approved';
+          } else if (inst.all_reviewed === false || hasUnreviewedTi || resolvedInstStatus?.requiresReview) {
+            sessionStatus = 'Unapproved';
           } else {
             sessionStatus = 'Unapproved';
           }
@@ -1782,39 +1746,19 @@ class QATrackClient {
           if (!uName) uName = 'Unknown Machine';
           if (!tListName) tListName = 'Patient Specific QA';
 
-          // Filter by testListNames if specified
-          if (targetLists.length > 0) {
-            const matches = targetLists.some(tl => tl.toLowerCase().trim() === tListName.toLowerCase().trim()) ||
-              (inst.test_list_name && targetLists.some(tl => tl.toLowerCase().trim() === inst.test_list_name.toLowerCase().trim()));
-            if (!matches) continue;
-          }
+          // Do not discard incoming sessions: any valid QA session returned by QATrack+
+          // is stored in SQLite. Dataset-specific unit and test list scoping is handled at display/query time.
 
-          // Filter by unitNames if specified (fuzzy match: lowercase and stripped spaces/hyphens)
-          if (targetUnits.length > 0) {
-            const uMatch = targetUnits.some(un => {
-              const a = un.toLowerCase().trim();
-              const b = uName.toLowerCase().trim();
-              return a === b || a.replace(/[\s-_]/g, '') === b.replace(/[\s-_]/g, '');
-            });
-            if (!uMatch) continue;
-          }
 
-          // Ingest sessions for active units, OR any unit specifically requested by the user
-          const isExplicitlyRequested = targetUnits.length > 0 && targetUnits.some(un => {
-            const a = un.toLowerCase().trim();
-            const b = uName.toLowerCase().trim();
-            return a === b || a.replace(/[\s-_]/g, '') === b.replace(/[\s-_]/g, '');
-          });
-          const uClean = uName.toLowerCase().replace(/[\s-_]/g, '');
-          if (!isExplicitlyRequested && activeUnitNames.size > 0 && !activeUnitNames.has(uName.toLowerCase().trim()) && !activeUnitNames.has(uClean)) {
-            continue;
-          }
-
-          const dateStr = (inst.work_completed || inst.work_started || inst.created || new Date().toISOString())
+          const workStartedStr = (inst.work_started || inst.work_completed || inst.created || new Date().toISOString())
             .replace('T', ' ')
             .substring(0, 19);
+          const workCompletedStr = (inst.work_completed || inst.work_started || inst.created || new Date().toISOString())
+            .replace('T', ' ')
+            .substring(0, 19);
+          const dateStr = workStartedStr;
 
-          // Filter by date range if specified
+          // Filter by date range if specified (using work_started)
           if (dateFrom && dateStr.substring(0, 10) < dateFrom) continue;
           if (dateTo && dateStr.substring(0, 10) > dateTo) continue;
 
@@ -1854,7 +1798,8 @@ class QATrackClient {
             null,
             uName,
             tListName,
-            dateStr,
+            workStartedStr,
+            workCompletedStr,
             createdBy,
             sessionStatus,
             cleanComments,
@@ -1907,10 +1852,12 @@ class QATrackClient {
         }
       });
 
+      this.resetAgents();
+
       // Resolve targetLists from yVariable if targetLists was not provided
       if (targetLists.length === 0 && options.yVariable) {
         try {
-          const defRows = db.prepare('SELECT DISTINCT test_list_name FROM test_definitions WHERE name = ?').all(options.yVariable);
+          const defRows = db.prepare('SELECT DISTINCT test_list_name FROM test_definitions WHERE slug = ? OR name = ?').all(options.yVariable, options.yVariable);
           const resolvedLists = defRows.map(r => r.test_list_name).filter(l => l && l !== 'General QA');
           for (const l of resolvedLists) {
             if (!targetLists.includes(l)) targetLists.push(l);
@@ -1919,8 +1866,8 @@ class QATrackClient {
             SELECT DISTINCT s.test_list_name 
             FROM sessions s 
             JOIN test_values tv ON s.id = tv.session_id 
-            WHERE tv.test_name = ?
-          `).all(options.yVariable);
+            WHERE tv.test_slug = ? OR tv.test_name = ?
+          `).all(options.yVariable, options.yVariable);
           for (const sr of sessRows) {
             if (sr.test_list_name && sr.test_list_name !== 'General QA' && !targetLists.includes(sr.test_list_name)) {
               targetLists.push(sr.test_list_name);
@@ -1929,11 +1876,8 @@ class QATrackClient {
         } catch (_) {}
       }
 
-      // Target units: if specific units were requested, preserve them; otherwise default to active units
-      let effectiveTargetUnits = [...targetUnits];
-      if (effectiveTargetUnits.length === 0) {
-        effectiveTargetUnits = activeUnitRows.map(u => u.name);
-      }
+      // Target units: if specific units were requested, preserve them; otherwise empty means all units
+      const effectiveTargetUnits = [...targetUnits];
       const targetUnitsLower = effectiveTargetUnits.map(u => u.toLowerCase().trim());
       const targetUnitsClean = effectiveTargetUnits.map(u => u.toLowerCase().replace(/[\s-_]/g, ''));
 
@@ -2022,9 +1966,6 @@ class QATrackClient {
           (colInfo.testListId && targetTestListIds.includes(colInfo.testListId));
 
         if (uMatch && tlMatch) {
-          const isExplicitUnit = targetUnitsLower.length > 0 && (targetUnitsLower.includes(colUnitLower) || targetUnitsClean.includes(colUnitClean) || (colInfo.unitId && targetUnitIds.includes(colInfo.unitId)));
-          if (colInfo.active === false && !isExplicitUnit) continue;
-
           matchedUtcIds.add(numColId);
           queryTargets.push({
             params: { unit_test_collection: numColId },
@@ -2034,22 +1975,33 @@ class QATrackClient {
         }
       }
 
-
-      // 2. Targeted Fallback: Only if NO specific unit_test_collections matched above
-      // (e.g. ad-hoc QA, unassigned test list, or newly created machine/test list not yet in utcMap)
-      if (queryTargets.length === 0) {
-        if (targetUnitIds.length > 0 && targetTestListIds.length > 0) {
-          // Precise combined filter: filter by unit AND test list simultaneously in DRF
-          for (const uId of targetUnitIds) {
-            for (const tlId of targetTestListIds) {
-              queryTargets.push({
-                params: { unit_test_collection__unit: uId, test_list: tlId },
-                label: `${testListIdToName.get(tlId) || 'List #' + tlId} on ${unitIdToName.get(uId) || 'Unit #' + uId}`
-              });
-            }
+      // 2. Also target ad-hoc / direct test list sessions for the requested test lists.
+      // In QATrack+, ad-hoc QA sessions have unit_test_collection = null. Querying by test_list
+      // directly ensures all sessions across all units and frequencies are captured.
+      if (targetTestListIds.length > 0) {
+        for (const tlId of targetTestListIds) {
+          queryTargets.push({
+            params: { test_list: tlId },
+            label: `Test List: ${testListIdToName.get(tlId) || 'List #' + tlId}`
+          });
+        }
+      } else {
+        // When no specific test list is filtered, query ALL known test lists from testListMap
+        // to guarantee ad-hoc QA sessions (which have unit_test_collection = null) are captured!
+        for (const [tlKey, tlName] of testListMap.entries()) {
+          const numTlId = typeof tlKey === 'number' ? tlKey : (typeof tlKey === 'string' && /^\d+$/.test(tlKey) ? parseInt(tlKey, 10) : null);
+          if (numTlId !== null) {
+            queryTargets.push({
+              params: { test_list: numTlId },
+              label: `Test List: ${tlName || 'List #' + numTlId}`
+            });
           }
-        } else if (targetUnitIds.length > 0) {
-          // Fallback to unit ID
+        }
+      }
+
+      // 3. Fallback: Only if NO query targets were generated above
+      if (queryTargets.length === 0) {
+        if (targetUnitIds.length > 0) {
           for (const uId of targetUnitIds) {
             queryTargets.push({
               params: { unit_test_collection__unit: uId },
@@ -2057,19 +2009,10 @@ class QATrackClient {
             });
           }
         } else if (targetUnits.length > 0) {
-          // Fallback to unit name
           for (const uName of targetUnits) {
             queryTargets.push({
               params: { unit_test_collection__unit__name: uName },
               label: `${uName}`
-            });
-          }
-        } else if (targetTestListIds.length > 0) {
-          // Fallback to test list ID
-          for (const tlId of targetTestListIds) {
-            queryTargets.push({
-              params: { test_list: tlId },
-              label: `${testListIdToName.get(tlId) || 'List #' + tlId}`
             });
           }
         }
@@ -2245,6 +2188,10 @@ class QATrackClient {
     }
 
     this.reloadConfig();
+    this.cachedMetadata = null;
+    this.userMap.clear();
+    this.commentMap.clear();
+    this.resetAgents();
     const startTime = Date.now();
     const effectiveIncludeUnapproved = options.includeUnapproved !== undefined ? Boolean(options.includeUnapproved) : this.includeUnapproved;
     const effectiveIncludeRejected = options.includeRejected !== undefined ? Boolean(options.includeRejected) : this.includeRejected;
@@ -2269,11 +2216,12 @@ class QATrackClient {
 
       // 7. Test List Instances (Sessions) - Streaming page-by-page database insert
       const insertSession = db.prepare(`
-        INSERT INTO sessions (qatrack_instance_id, unit_id, unit_name, test_list_name, work_completed, created_by, status, comments, reviewed_by, reviewed_at, modified_by, modified_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO sessions (qatrack_instance_id, unit_id, unit_name, test_list_name, work_started, work_completed, created_by, status, comments, reviewed_by, reviewed_at, modified_by, modified_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(qatrack_instance_id) DO UPDATE SET
           unit_name = excluded.unit_name,
           test_list_name = excluded.test_list_name,
+          work_started = excluded.work_started,
           work_completed = excluded.work_completed,
           created_by = excluded.created_by,
           status = excluded.status,
@@ -2324,18 +2272,21 @@ class QATrackClient {
 
           // Determine session status
           let sessionStatus = 'Completed';
+          const resolvedInstStatus = inst.status ? this.resolveTestInstanceStatus(inst, testInstanceStatusMap) : null;
           if (inst.status_name) {
             sessionStatus = inst.status_name;
-          } else if (typeof inst.status === 'string' && inst.status.trim() && !inst.status.startsWith('http')) {
+          } else if (resolvedInstStatus?.name && resolvedInstStatus.name !== 'Approved' && resolvedInstStatus.name !== 'Unreviewed') {
+            sessionStatus = resolvedInstStatus.name;
+          } else if (typeof inst.status === 'string' && inst.status.trim() && !inst.status.startsWith('http') && isNaN(Number(inst.status))) {
             sessionStatus = inst.status.trim();
-          } else if (allRejectedTi) {
+          } else if (resolvedInstStatus?.isRejected || allRejectedTi) {
             sessionStatus = 'Rejected';
           } else if (inst.in_progress) {
             sessionStatus = 'In Progress';
-          } else if (inst.all_reviewed === false || hasUnreviewedTi) {
-            sessionStatus = 'Unapproved';
-          } else if (inst.all_reviewed) {
+          } else if (inst.all_reviewed === true || (!resolvedInstStatus?.requiresReview && !hasUnreviewedTi && inst.all_reviewed !== false)) {
             sessionStatus = 'Approved';
+          } else if (inst.all_reviewed === false || hasUnreviewedTi || resolvedInstStatus?.requiresReview) {
+            sessionStatus = 'Unapproved';
           } else {
             sessionStatus = 'Unapproved';
           }
@@ -2386,7 +2337,30 @@ class QATrackClient {
             }
           }
 
-          if (!unitName || unitName === 'Unknown Machine') {
+          if ((unitName === 'Unknown Machine' || !unitName) && rawTestInstances.length > 0) {
+            try {
+              for (const ti of rawTestInstances) {
+                const utiKey = ti.unit_test_info ? (typeof ti.unit_test_info === 'number' ? ti.unit_test_info : this.extractIdFromUrl(ti.unit_test_info)) : null;
+                if (utiKey) {
+                  const dbUti = db.prepare('SELECT unit_id FROM unit_test_infos WHERE id = ?').get(utiKey);
+                  if (dbUti && dbUti.unit_id) {
+                    const dbU = db.prepare('SELECT name FROM units WHERE id = ?').get(dbUti.unit_id);
+                    if (dbU && dbU.name) {
+                      unitName = dbU.name;
+                      break;
+                    }
+                  }
+                }
+              }
+            } catch (_) {}
+          }
+
+          if (!unitName) {
+            unitName = 'Unknown Machine';
+          }
+
+          // Only skip empty stub sessions with no test instances and unknown machine
+          if (rawTestInstances.length === 0 && unitName === 'Unknown Machine') {
             continue;
           }
 
@@ -2394,9 +2368,13 @@ class QATrackClient {
             this.resolveTestListName(inst.test_list, testListMap) ||
             (typeof inst.test_list_name === 'string' && inst.test_list_name ? inst.test_list_name : null) ||
             'Patient Specific QA';
-          const dateStr = (inst.work_completed || inst.work_started || inst.created || new Date().toISOString())
+          const workStartedStr = (inst.work_started || inst.work_completed || inst.created || new Date().toISOString())
             .replace('T', ' ')
             .substring(0, 19);
+          const workCompletedStr = (inst.work_completed || inst.work_started || inst.created || new Date().toISOString())
+            .replace('T', ' ')
+            .substring(0, 19);
+          const dateStr = workStartedStr;
 
           const createdBy = this.resolveUserName(inst.created_by, inst);
           const cleanComments = this.resolveCommentsSync(inst);
@@ -2434,7 +2412,8 @@ class QATrackClient {
             null,
             unitName,
             testListName,
-            dateStr,
+            workStartedStr,
+            workCompletedStr,
             createdBy,
             sessionStatus,
             cleanComments,
@@ -2488,19 +2467,50 @@ class QATrackClient {
       });
 
       this.syncStatus.stage = 'Syncing QA Sessions...';
-      await this.fetchAllPages(endpoints.testListInstancesUrl, {}, async (pageBatch) => {
-        if (pageBatch && pageBatch.length > 0) {
-          processBatch(pageBatch);
-          this.syncStatus.syncedSessions = syncedCount;
-          const totalStr = this.syncStatus.totalAvailable ? ` of ${this.syncStatus.totalAvailable}` : '';
-          this.syncStatus.stage = `Syncing QA sessions (${syncedCount}${totalStr} entries processed)...`;
+      const allTestLists = Array.from(testListMap.entries())
+        .map(([id, name]) => ({
+          id: typeof id === 'number' ? id : (typeof id === 'string' && /^\d+$/.test(id) ? parseInt(id, 10) : null),
+          name
+        }))
+        .filter(t => t.id !== null);
+
+      let fullSyncHadErrors = false;
+      if (allTestLists.length > 0) {
+        let tlIdx = 0;
+        for (const tl of allTestLists) {
+          if (this.syncStatus.isCancelled) break;
+          tlIdx++;
+          this.syncStatus.stage = `[${tlIdx}/${allTestLists.length}] Syncing QA sessions for ${tl.name}...`;
           this.updateMemoryStats();
+          try {
+            await this.fetchAllPages(endpoints.testListInstancesUrl, { test_list: tl.id, ordering: '-work_completed' }, async (pageBatch) => {
+              if (pageBatch && pageBatch.length > 0) {
+                processBatch(pageBatch);
+                this.syncStatus.syncedSessions = syncedCount;
+                this.syncStatus.stage = `[${tlIdx}/${allTestLists.length}] ${tl.name}: (${syncedCount} total sessions processed)...`;
+                this.updateMemoryStats();
+              }
+            });
+          } catch (tlErr) {
+            fullSyncHadErrors = true;
+            console.warn(`Warning: failed to sync test list ${tl.name} (#${tl.id}):`, tlErr.message);
+          }
         }
-      });
+      } else {
+        await this.fetchAllPages(endpoints.testListInstancesUrl, { ordering: '-work_completed' }, async (pageBatch) => {
+          if (pageBatch && pageBatch.length > 0) {
+            processBatch(pageBatch);
+            this.syncStatus.syncedSessions = syncedCount;
+            const totalStr = this.syncStatus.totalAvailable ? ` of ${this.syncStatus.totalAvailable}` : '';
+            this.syncStatus.stage = `Syncing QA sessions (${syncedCount}${totalStr} entries processed)...`;
+            this.updateMemoryStats();
+          }
+        });
+      }
 
       // Reconcile deleted sessions on full sync: remove any local sessions that are no longer returned by QATrack+
       let deletedSessionsCount = 0;
-      if (!this.syncStatus.isCancelled && fetchedQATrackIds.size > 0) {
+      if (!this.syncStatus.isCancelled && !fullSyncHadErrors && fetchedQATrackIds.size > 0) {
         try {
           let selectSql = 'SELECT id, qatrack_instance_id FROM sessions WHERE qatrack_instance_id IS NOT NULL';
           const allDbSessions = db.prepare(selectSql).all();
@@ -2550,8 +2560,12 @@ class QATrackClient {
     try {
       const endpoints = await this.discoverEndpoints();
       const baseInstUrl = (endpoints.testListInstancesUrl || `${this.baseUrl}/api/qc/testlistinstances/`).replace(/\/$/, '');
-      const url = `${baseInstUrl}/${instanceId}/`;
-      const res = await this.client.get(url);
+      const res = await axios.get(url, {
+        headers: this.getHeaders(),
+        timeout: 15000,
+        httpAgent: this.httpAgent,
+        httpsAgent: this.httpsAgent
+      });
       if (res.data) {
         const inst = res.data;
         let reviewedBy = this.resolveUserName(inst.reviewed_by || inst.reviewed_by_name, inst, inst.reviewed_by_name);

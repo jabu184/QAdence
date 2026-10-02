@@ -37,6 +37,8 @@ export default function DatasetManager({
   onChangeXVariable,
   yVariable,
   onChangeYVariable,
+  onChangeYVariableForAll,
+  onSelectVariable,
   selectedTestList = '',
   onChangeSelectedTestList,
   includeAllInstances = true,
@@ -47,6 +49,10 @@ export default function DatasetManager({
   onChangeDisplayMode,
   trendlineConfig,
   onChangeTrendlineConfig,
+  // Global Time Window & Year
+  globalDateFrom = '',
+  globalDateTo = '',
+  onChangeGlobalDates,
   // Data retrieval & local analysis actions
   onRetrieveData,
   onRunLocalQuery,
@@ -60,35 +66,41 @@ export default function DatasetManager({
   const numericTests = tests.filter(t => t.isNumeric);
   const effectiveScopedNumeric = scopedNumericTests || numericTests;
   const effectiveScopedTests = scopedTests || tests;
-  const uniqueNumerics = getUniqueTests(numericTests);
 
-  const selectValue = useMemo(() => {
-    if (includeAllInstances) {
-      return JSON.stringify({ list: '', name: yVariable });
-    }
-    const validForY = numericTests.filter(t => t.name === yVariable);
-    if (selectedTestList && validForY.some(t => (t.testList || 'General QA') === selectedTestList)) {
-      return JSON.stringify({ list: selectedTestList, name: yVariable });
-    }
-    if (validForY.length > 0) {
-      return JSON.stringify({ list: validForY[0].testList || 'General QA', name: yVariable });
-    }
-    return JSON.stringify({ list: '', name: yVariable });
-  }, [includeAllInstances, selectedTestList, yVariable, numericTests]);
+  // Detect whether active datasets differ in their Measurement Variable (Y-Axis)
+  const activeDatasets = datasets.filter(d => d.visible !== false);
+  const configuredYVars = (activeDatasets.length > 0 ? activeDatasets : datasets)
+    .map(d => d.yVariable || yVariable)
+    .filter(Boolean);
+  const uniqueYVars = [...new Set(configuredYVars)];
+  const isMultipleYVars = uniqueYVars.length > 1;
 
-  const handleYSelectChange = (e) => {
-    try {
-      const { list, name } = JSON.parse(e.target.value);
-      onChangeYVariable(name);
-      if (list === '') {
-        if (onChangeSelectedTestList) onChangeSelectedTestList('');
-        if (onChangeIncludeAllInstances) onChangeIncludeAllInstances(true);
+  const handleTopVariableSelect = ({ list, name, displayNameWithMacro, displayName }) => {
+    const friendlyName = displayNameWithMacro || displayName || name;
+    const confirmed = window.confirm(`Change measurement variable for ALL data sets to "${friendlyName}"? This will update all data sets.`);
+    if (!confirmed) return;
+    if (onChangeYVariableForAll) {
+      onChangeYVariableForAll(name, list);
+    } else {
+      if (onSelectVariable) {
+        onSelectVariable({ list, name });
       } else {
-        if (onChangeSelectedTestList) onChangeSelectedTestList(list);
-        if (onChangeIncludeAllInstances) onChangeIncludeAllInstances(false);
+        onChangeYVariable(name);
+        if (list === '') {
+          if (onChangeSelectedTestList) onChangeSelectedTestList('');
+          if (onChangeIncludeAllInstances) onChangeIncludeAllInstances(true);
+        } else {
+          if (onChangeSelectedTestList) onChangeSelectedTestList(list);
+          if (onChangeIncludeAllInstances) onChangeIncludeAllInstances(false);
+        }
       }
-    } catch {
-      onChangeYVariable(e.target.value);
+      datasets.forEach(d => {
+        onUpdateDataset(d.id, {
+          yVariable: name,
+          selectedTestList: list,
+          includeAllInstances: list === ''
+        });
+      });
     }
   };
 
@@ -117,20 +129,12 @@ export default function DatasetManager({
             </div>
             <SearchableVariableSelect
               value={{ list: selectedTestList, name: yVariable }}
-              onChange={({ list, name }) => {
-                onChangeYVariable(name);
-                if (list === '') {
-                  if (onChangeSelectedTestList) onChangeSelectedTestList('');
-                  if (onChangeIncludeAllInstances) onChangeIncludeAllInstances(true);
-                } else {
-                  if (onChangeSelectedTestList) onChangeSelectedTestList(list);
-                  if (onChangeIncludeAllInstances) onChangeIncludeAllInstances(false);
-                }
-              }}
+              onChange={handleTopVariableSelect}
               tests={numericTests}
               includeAllInstances={includeAllInstances}
               onToggleIncludeAllInstances={onChangeIncludeAllInstances}
-              placeholder="Search or select variable..."
+              isMultiple={isMultipleYVars}
+              placeholder={isMultipleYVars ? "Multiple Variables Selected" : "Search or select variable..."}
             />
           </div>
 
@@ -241,6 +245,147 @@ export default function DatasetManager({
                 </div>
               )}
             </div>
+          </div>
+        </div>
+
+        {/* Row 1.5: Global Time Window & Year (Applied to All Datasets) */}
+        <div style={{
+          display: 'flex',
+          flexWrap: 'wrap',
+          alignItems: 'center',
+          gap: '0.45rem',
+          marginTop: '0.85rem',
+          paddingTop: '0.85rem',
+          borderTop: '1px solid #f1f5f9'
+        }}>
+          <label style={{ fontSize: '0.78rem', fontWeight: '700', color: '#475569', textTransform: 'uppercase', whiteSpace: 'nowrap', marginRight: '0.2rem' }}>
+            Time Window & Year:
+          </label>
+
+          {/* All Time */}
+          <button
+            type="button"
+            onClick={() => onChangeGlobalDates && onChangeGlobalDates('', '')}
+            style={{
+              padding: '4px 10px',
+              borderRadius: '6px',
+              fontSize: '0.8rem',
+              background: (!globalDateFrom && !globalDateTo) ? '#eff6ff' : '#f8fafc',
+              color: (!globalDateFrom && !globalDateTo) ? '#2563eb' : '#64748b',
+              border: '1px solid ' + ((!globalDateFrom && !globalDateTo) ? '#2563eb' : '#e2e8f0'),
+              fontWeight: (!globalDateFrom && !globalDateTo) ? '600' : 'normal',
+              cursor: 'pointer'
+            }}
+          >
+            All Time
+          </button>
+
+          {/* Current Year */}
+          <button
+            type="button"
+            onClick={() => {
+              const cy = new Date().getFullYear();
+              onChangeGlobalDates && onChangeGlobalDates(`${cy}-01-01`, `${cy}-12-31`);
+            }}
+            style={{
+              padding: '4px 10px',
+              borderRadius: '6px',
+              fontSize: '0.8rem',
+              background: (globalDateFrom === `${new Date().getFullYear()}-01-01` && globalDateTo === `${new Date().getFullYear()}-12-31`) ? '#eff6ff' : '#f8fafc',
+              color: (globalDateFrom === `${new Date().getFullYear()}-01-01` && globalDateTo === `${new Date().getFullYear()}-12-31`) ? '#2563eb' : '#64748b',
+              border: '1px solid ' + ((globalDateFrom === `${new Date().getFullYear()}-01-01` && globalDateTo === `${new Date().getFullYear()}-12-31`) ? '#2563eb' : '#e2e8f0'),
+              fontWeight: (globalDateFrom === `${new Date().getFullYear()}-01-01`) ? '600' : 'normal',
+              cursor: 'pointer'
+            }}
+          >
+            Current Year ({new Date().getFullYear()})
+          </button>
+
+          {/* Specific Year Selector */}
+          <select
+            value={
+              (globalDateFrom && globalDateTo && globalDateFrom.startsWith(globalDateFrom.substring(0, 4)) && globalDateTo.startsWith(globalDateFrom.substring(0, 4)) && globalDateFrom.endsWith('-01-01') && globalDateTo.endsWith('-12-31'))
+                ? globalDateFrom.substring(0, 4)
+                : ''
+            }
+            onChange={(e) => {
+              const yr = e.target.value;
+              if (!yr) {
+                onChangeGlobalDates && onChangeGlobalDates('', '');
+              } else {
+                onChangeGlobalDates && onChangeGlobalDates(`${yr}-01-01`, `${yr}-12-31`);
+              }
+            }}
+            style={{
+              padding: '4px 8px',
+              borderRadius: '6px',
+              fontSize: '0.8rem',
+              background: '#ffffff',
+              border: '1px solid #cbd5e1',
+              color: '#334155',
+              cursor: 'pointer'
+            }}
+          >
+            <option value="">-- Select Year --</option>
+            {(years || []).map(yr => (
+              <option key={yr} value={yr}>Year {yr}</option>
+            ))}
+          </select>
+
+          {/* 30 & 90 Days */}
+          {[
+            { label: '30 Days', days: 30 },
+            { label: '90 Days', days: 90 }
+          ].map(p => (
+            <button
+              key={p.label}
+              type="button"
+              onClick={() => {
+                const d = new Date();
+                d.setDate(d.getDate() - p.days);
+                onChangeGlobalDates && onChangeGlobalDates(d.toISOString().split('T')[0], '');
+              }}
+              style={{
+                padding: '4px 8px',
+                borderRadius: '6px',
+                fontSize: '0.8rem',
+                background: '#f8fafc',
+                color: '#64748b',
+                border: '1px solid #e2e8f0',
+                cursor: 'pointer'
+              }}
+            >
+              {p.label}
+            </button>
+          ))}
+
+          {/* Custom Dates Inputs */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: '3px', marginLeft: '0.2rem' }}>
+            <input
+              type="date"
+              value={globalDateFrom || ''}
+              onChange={(e) => onChangeGlobalDates && onChangeGlobalDates(e.target.value, globalDateTo || '')}
+              title="Start Date (From) - Applies to all datasets"
+              style={{
+                padding: '3px 6px',
+                borderRadius: '6px',
+                border: '1px solid #cbd5e1',
+                fontSize: '0.78rem'
+              }}
+            />
+            <span style={{ fontSize: '0.75rem', color: '#94a3b8' }}>-</span>
+            <input
+              type="date"
+              value={globalDateTo || ''}
+              onChange={(e) => onChangeGlobalDates && onChangeGlobalDates(globalDateFrom || '', e.target.value)}
+              title="End Date (To) - Applies to all datasets"
+              style={{
+                padding: '3px 6px',
+                borderRadius: '6px',
+                border: '1px solid #cbd5e1',
+                fontSize: '0.78rem'
+              }}
+            />
           </div>
         </div>
 
@@ -755,9 +900,9 @@ export default function DatasetManager({
       {/* 3. Active Dataset Editor (Controls for the selected dataset) */}
       {activeDataset && (
         <div className="card" style={{ padding: '1.25rem', borderLeft: `4px solid ${activeDataset.color || '#2563eb'}` }}>
-          {/* Dataset Name and Color Picker */}
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '1rem', flexWrap: 'wrap', gap: '0.75rem' }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flex: 1, minWidth: '240px' }}>
+          {/* Dataset Name, Measurement Variable & Color Picker */}
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '1rem', flexWrap: 'wrap', gap: '0.75rem', paddingBottom: '0.75rem', borderBottom: '1px solid #f1f5f9' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '10px', minWidth: '220px' }}>
               <label style={{ fontSize: '0.8rem', fontWeight: '700', color: '#475569' }}>
                 Dataset Name:
               </label>
@@ -772,8 +917,35 @@ export default function DatasetManager({
                   fontSize: '0.85rem',
                   fontWeight: '600',
                   color: '#0f172a',
-                  width: '260px'
+                  width: '200px'
                 }}
+              />
+            </div>
+
+            {/* Measurement Variable for THIS Dataset */}
+            <div style={{ minWidth: '240px', maxWidth: '340px', flex: '1 1 240px' }}>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '0.2rem' }}>
+                <label style={{ fontSize: '0.78rem', fontWeight: '700', color: '#1e293b' }}>
+                  Measurement Variable (Y-Axis):
+                </label>
+              </div>
+              <SearchableVariableSelect
+                value={{
+                  list: activeDataset.selectedTestList !== undefined ? activeDataset.selectedTestList : selectedTestList,
+                  name: activeDataset.yVariable || yVariable
+                }}
+                onChange={({ list, name }) => {
+                  onUpdateDataset(activeDataset.id, {
+                    yVariable: name,
+                    selectedTestList: list,
+                    includeAllInstances: list === ''
+                  });
+                }}
+                tests={numericTests}
+                includeAllInstances={activeDataset.includeAllInstances !== undefined ? activeDataset.includeAllInstances : includeAllInstances}
+                onToggleIncludeAllInstances={(val) => onUpdateDataset(activeDataset.id, { includeAllInstances: val })}
+                placeholder="Select variable for this dataset..."
+                compact={true}
               />
             </div>
 

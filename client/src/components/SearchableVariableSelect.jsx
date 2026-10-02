@@ -12,7 +12,9 @@ export default function SearchableVariableSelect({
   includeAllInstances = true,
   onToggleIncludeAllInstances,
   placeholder = 'Select variable...',
-  compact = false
+  compact = false,
+  isMultiple = false,
+  multipleLabel = 'Multiple Variables Selected'
 }) {
   const [isOpen, setIsOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
@@ -42,13 +44,13 @@ export default function SearchableVariableSelect({
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, [isOpen]);
 
-  const valName = typeof value === 'object' ? value?.name : value;
+  const valName = typeof value === 'object' ? (value?.slug || value?.name) : value;
   const valList = typeof value === 'object' ? value?.list : '';
   const isDateSelected = allowDateOption && (valName === 'work_completed');
 
   const currentTest = useMemo(() => {
     if (!valName || valName === 'work_completed') return null;
-    return usableTests.find(t => t.name === valName) || { name: valName, unit: '' };
+    return usableTests.find(t => (t.slug && t.slug === valName) || t.name === valName) || { name: valName, slug: valName, unit: '' };
   }, [valName, usableTests]);
 
   const filteredGroups = useMemo(() => {
@@ -59,7 +61,11 @@ export default function SearchableVariableSelect({
     }).map(([listName, items]) => {
       const matchingItems = items.filter(t => {
         if (!q) return true;
-        return t.name.toLowerCase().includes(q) || listName.toLowerCase().includes(q);
+        const nameMatch = t.name && t.name.toLowerCase().includes(q);
+        const slugMatch = t.slug && t.slug.toLowerCase().includes(q);
+        const macroDisplayMatch = t.displayNameWithMacro && t.displayNameWithMacro.toLowerCase().includes(q);
+        const listMatch = listName.toLowerCase().includes(q);
+        return nameMatch || slugMatch || macroDisplayMatch || listMatch;
       });
       return [listName, matchingItems];
     }).filter(([_, items]) => items.length > 0);
@@ -69,14 +75,27 @@ export default function SearchableVariableSelect({
     if (filterList !== 'ALL') return [];
     const q = searchQuery.toLowerCase().trim();
     if (!q) return uniqueTests;
-    return uniqueTests.filter(t => t.name.toLowerCase().includes(q));
+    return uniqueTests.filter(t => {
+      const nameMatch = t.name && t.name.toLowerCase().includes(q);
+      const slugMatch = t.slug && t.slug.toLowerCase().includes(q);
+      const macroDisplayMatch = t.displayNameWithMacro && t.displayNameWithMacro.toLowerCase().includes(q);
+      return nameMatch || slugMatch || macroDisplayMatch;
+    });
   }, [uniqueTests, searchQuery, filterList]);
 
-  const handleSelect = (list, name) => {
+  const handleSelect = (list, item) => {
+    const varValue = typeof item === 'object' ? (item.slug || item.name) : item;
+    const itemObj = typeof item === 'object' ? item : (usableTests.find(t => t.slug === item || t.name === item) || {});
     if (returnStringOnly) {
-      onChange(name);
+      onChange(varValue);
     } else {
-      onChange({ list, name });
+      onChange({
+        list,
+        name: varValue,
+        displayName: itemObj.name || varValue,
+        displayNameWithMacro: itemObj.displayNameWithMacro || itemObj.name || varValue,
+        slug: itemObj.slug || varValue
+      });
     }
     setIsOpen(false);
   };
@@ -106,10 +125,29 @@ export default function SearchableVariableSelect({
             <span style={{ fontWeight: '700', fontSize: compact ? '0.82rem' : '0.88rem', color: '#0f172a', whiteSpace: 'nowrap' }}>
               📅 Date (Time-Series Trend)
             </span>
+          ) : isMultiple ? (
+            <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+              <span style={{
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: '5px',
+                padding: '2px 8px',
+                borderRadius: '6px',
+                background: '#fef3c7',
+                border: '1px solid #fde68a',
+                color: '#b45309',
+                fontSize: compact ? '0.78rem' : '0.84rem',
+                fontWeight: '700',
+                whiteSpace: 'nowrap'
+              }}>
+                <Layers size={13} color="#d97706" />
+                {multipleLabel}
+              </span>
+            </div>
           ) : (
             <>
               <span style={{ fontWeight: '700', fontSize: compact ? '0.82rem' : '0.88rem', color: currentTest ? '#0f172a' : '#94a3b8', whiteSpace: 'nowrap', textOverflow: 'ellipsis', overflow: 'hidden' }}>
-                {currentTest ? currentTest.name : placeholder}
+                {currentTest ? (currentTest.displayNameWithMacro || currentTest.displayName || currentTest.name) : placeholder}
               </span>
               {currentTest?.unit && (
                 <span style={{ fontSize: '0.72rem', background: '#f1f5f9', color: '#475569', padding: '1px 5px', borderRadius: '4px', fontWeight: '500' }}>
@@ -159,7 +197,7 @@ export default function SearchableVariableSelect({
                 type="text"
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
-                placeholder="Search variables or protocols (e.g. dose, gamma, temp)..."
+                placeholder="Search variables or macro names (e.g. output_diff, dose)..."
                 style={{
                   width: '100%',
                   padding: '0.45rem 1.75rem 0.45rem 2rem',
@@ -267,11 +305,12 @@ export default function SearchableVariableSelect({
                   Across All Test Lists ({filteredAllInstances.length})
                 </div>
                 {filteredAllInstances.map(t => {
-                  const isSelected = valName === t.name;
+                  const isSelected = valName && (valName === t.slug || valName === t.name);
+                  const itemKey = 'global-' + (t.slug || t.name) + '-' + (t.testList || '');
                   return (
                     <div
-                      key={'global-' + t.name}
-                      onClick={() => handleSelect('', t.name)}
+                      key={itemKey}
+                      onClick={() => handleSelect('', t)}
                       style={{
                         padding: '6px 10px',
                         borderRadius: '6px',
@@ -289,7 +328,7 @@ export default function SearchableVariableSelect({
                       onMouseLeave={(e) => { if (!isSelected) e.currentTarget.style.background = 'transparent'; }}
                     >
                       <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                        <span>{t.name}</span>
+                        <span>{t.displayNameWithMacro || t.name}</span>
                         {t.unit && <span style={{ fontSize: '0.7rem', color: '#64748b' }}>({t.unit})</span>}
                         {!onlyNumeric && (
                           <span style={{ fontSize: '0.68rem', background: t.isNumeric ? '#ecfdf5' : '#f8fafc', color: t.isNumeric ? '#059669' : '#64748b', padding: '1px 5px', borderRadius: '4px', fontWeight: '600' }}>
@@ -338,12 +377,13 @@ export default function SearchableVariableSelect({
                   </div>
 
                   {items.map(t => {
-                    const isSelected = (!includeAllInstances && valList === listName && valName === t.name) ||
-                                       (includeAllInstances && valName === t.name && !valList);
+                    const isSelected = (!includeAllInstances && valList === listName && (valName === t.slug || valName === t.name)) ||
+                                       (includeAllInstances && (valName === t.slug || valName === t.name) && !valList);
+                    const itemKey = listName + '-' + (t.slug || t.name);
                     return (
                       <div
-                        key={listName + '-' + t.name}
-                        onClick={() => handleSelect(listName, t.name)}
+                        key={itemKey}
+                        onClick={() => handleSelect(listName, t)}
                         style={{
                           padding: '6px 10px',
                           borderRadius: '6px',
@@ -361,7 +401,7 @@ export default function SearchableVariableSelect({
                         onMouseLeave={(e) => { if (!isSelected) e.currentTarget.style.background = 'transparent'; }}
                       >
                         <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                          <span>{t.name}</span>
+                          <span>{t.displayNameWithMacro || t.name}</span>
                           {t.unit && <span style={{ fontSize: '0.7rem', color: '#64748b' }}>({t.unit})</span>}
                           {!onlyNumeric && (
                             <span style={{ fontSize: '0.68rem', background: t.isNumeric ? '#ecfdf5' : '#f8fafc', color: t.isNumeric ? '#059669' : '#64748b', padding: '1px 5px', borderRadius: '4px', fontWeight: '600' }}>

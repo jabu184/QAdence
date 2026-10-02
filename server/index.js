@@ -12,8 +12,13 @@ const PORT = process.env.PORT || 5000;
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
 
-// API routes
-app.use('/api', apiRouter);
+// API routes - prevent any caching of API responses
+app.use('/api', (req, res, next) => {
+  res.set('Cache-Control', 'no-store, no-cache, must-revalidate, private');
+  res.set('Pragma', 'no-cache');
+  res.set('Expires', '0');
+  next();
+}, apiRouter);
 
 // Serve client in production if built
 const clientDist = path.join(__dirname, '..', 'client', 'dist');

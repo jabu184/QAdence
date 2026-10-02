@@ -5,6 +5,8 @@ export default function DataTable({
   tableRows = [],
   yVariable,
   xVariable,
+  yVariableLabel,
+  xVariableLabel,
   ignoredSessionIds = [],
   onToggleIgnore,
   onInspectSession
@@ -13,6 +15,32 @@ export default function DataTable({
   const [sortField, setSortField] = useState('date');
   const [sortAsc, setSortAsc] = useState(false);
   const [hideIgnored, setHideIgnored] = useState(false);
+
+  const distinctDatasets = useMemo(() => {
+    const set = new Set();
+    for (const r of tableRows) {
+      if (r.datasetName) set.add(r.datasetName);
+    }
+    return Array.from(set);
+  }, [tableRows]);
+
+  const distinctYLabels = useMemo(() => {
+    const labels = new Set();
+    for (const r of tableRows) {
+      const lbl = r.yVariableLabel || r.yVariable;
+      if (lbl) labels.add(lbl);
+    }
+    return Array.from(labels);
+  }, [tableRows]);
+
+  const displayYName = useMemo(() => {
+    if (distinctYLabels.length === 0) return yVariableLabel || yVariable || 'Value';
+    if (distinctYLabels.length === 1) return distinctYLabels[0];
+    if (distinctYLabels.length <= 3) return distinctYLabels.join(' / ');
+    return 'Measurement Value';
+  }, [distinctYLabels, yVariableLabel, yVariable]);
+
+  const displayXName = xVariableLabel || (xVariable === 'work_completed' ? 'Date' : xVariable);
 
   const ignoredSet = useMemo(() => new Set(ignoredSessionIds), [ignoredSessionIds]);
 
@@ -26,6 +54,7 @@ export default function DataTable({
     if (search.trim()) {
       const q = search.toLowerCase();
       result = result.filter(r =>
+        (r.datasetName && r.datasetName.toLowerCase().includes(q)) ||
         (r.testList && r.testList.toLowerCase().includes(q)) ||
         (r['Patient ID'] && String(r['Patient ID']).toLowerCase().includes(q)) ||
         (r['Patient QA Patient ID'] && String(r['Patient QA Patient ID']).toLowerCase().includes(q)) ||
@@ -40,8 +69,20 @@ export default function DataTable({
     }
 
     result.sort((a, b) => {
-      let va = sortField === 'Plan ID' ? (a['Plan ID'] || a['Patient QA Plan'] || a['patient_qa_plan_id'] || a['Plan Name']) : a[sortField];
-      let vb = sortField === 'Plan ID' ? (b['Plan ID'] || b['Patient QA Plan'] || b['patient_qa_plan_id'] || b['Plan Name']) : b[sortField];
+      let va, vb;
+      if (sortField === 'Plan ID') {
+        va = a['Plan ID'] || a['Patient QA Plan'] || a['patient_qa_plan_id'] || a['Plan Name'];
+        vb = b['Plan ID'] || b['Patient QA Plan'] || b['patient_qa_plan_id'] || b['Plan Name'];
+      } else if (sortField === 'yValue' || sortField === yVariable) {
+        va = a.y !== undefined ? a.y : (a[a.yVariable] ?? a[yVariable] ?? a[displayYName]);
+        vb = b.y !== undefined ? b.y : (b[b.yVariable] ?? b[yVariable] ?? b[displayYName]);
+      } else if (sortField === 'datasetName') {
+        va = a.datasetName || '';
+        vb = b.datasetName || '';
+      } else {
+        va = a[sortField];
+        vb = b[sortField];
+      }
       if (va === undefined || va === null) return 1;
       if (vb === undefined || vb === null) return -1;
       if (typeof va === 'number' && typeof vb === 'number') {
@@ -53,7 +94,7 @@ export default function DataTable({
     });
 
     return result;
-  }, [tableRows, search, sortField, sortAsc, hideIgnored, ignoredSet]);
+  }, [tableRows, search, sortField, sortAsc, hideIgnored, ignoredSet, yVariable, displayYName]);
 
   const handleExportCsv = () => {
     // Only export active rows unless user unchecked hideIgnored
@@ -62,6 +103,8 @@ export default function DataTable({
 
     const headers = [
       'Session ID',
+      ...(distinctDatasets.length > 1 ? ['Dataset'] : []),
+      ...(distinctYLabels.length > 1 ? ['Variable'] : []),
       'Date',
       'Unit',
       'Test List',
@@ -69,8 +112,8 @@ export default function DataTable({
       'Plan ID',
       'Site',
       'Beam Energy',
-      yVariable,
-      ...(xVariable && xVariable !== 'work_completed' ? [xVariable] : []),
+      displayYName,
+      ...(xVariable && xVariable !== 'work_completed' ? [displayXName] : []),
       'Status'
     ];
 
@@ -80,8 +123,12 @@ export default function DataTable({
       const planIdVal = r['Plan ID'] || r['Patient QA Plan'] || r['patient_qa_plan_id'] || r['Plan Name'] || '';
       const site = r['Site'] || r['Patient QA Site'] || '';
       const energy = r['Beam Energy'] || r['Energy'] || '';
+      const yVal = r.y !== undefined ? r.y : (r[r.yVariable] !== undefined ? r[r.yVariable] : (r[yVariable] !== undefined ? r[yVariable] : (r[displayYName] !== undefined ? r[displayYName] : '')));
+      const xVal = xVariable && xVariable !== 'work_completed' ? (r[xVariable] !== undefined ? r[xVariable] : (r[displayXName] !== undefined ? r[displayXName] : '')) : '';
       const line = [
         r.sessionId,
+        ...(distinctDatasets.length > 1 ? [`"${r.datasetName || ''}"`] : []),
+        ...(distinctYLabels.length > 1 ? [`"${r.yVariableLabel || r.yVariable || ''}"`] : []),
         `"${r.date}"`,
         `"${r.unit || ''}"`,
         `"${r.testList || ''}"`,
@@ -89,8 +136,8 @@ export default function DataTable({
         `"${planIdVal}"`,
         `"${site}"`,
         `"${energy}"`,
-        r[yVariable] !== undefined ? r[yVariable] : '',
-        ...(xVariable && xVariable !== 'work_completed' ? [r[xVariable] !== undefined ? r[xVariable] : ''] : []),
+        yVal,
+        ...(xVariable && xVariable !== 'work_completed' ? [xVal] : []),
         `"${r.status || ''}"`
       ];
       csvLines.push(line.join(','));
@@ -173,6 +220,11 @@ export default function DataTable({
           <thead style={{ position: 'sticky', top: 0, background: '#f8fafc', zIndex: 10 }}>
             <tr style={{ borderBottom: '2px solid #e2e8f0', color: '#475569' }}>
               <th style={{ padding: '8px 12px', width: '90px' }}>Action</th>
+              {distinctDatasets.length > 1 && (
+                <th onClick={() => toggleSort('datasetName')} style={{ padding: '8px 12px', cursor: 'pointer' }}>
+                  Dataset {sortField === 'datasetName' && (sortAsc ? '↑' : '↓')}
+                </th>
+              )}
               <th onClick={() => toggleSort('date')} style={{ padding: '8px 12px', cursor: 'pointer' }}>
                 Date {sortField === 'date' && (sortAsc ? '↑' : '↓')}
               </th>
@@ -194,12 +246,12 @@ export default function DataTable({
               <th onClick={() => toggleSort('Beam Energy')} style={{ padding: '8px 12px', cursor: 'pointer' }}>
                 Energy
               </th>
-              <th onClick={() => toggleSort(yVariable)} style={{ padding: '8px 12px', cursor: 'pointer', color: '#2563eb' }}>
-                {yVariable} {sortField === yVariable && (sortAsc ? '↑' : '↓')}
+              <th onClick={() => toggleSort('yValue')} style={{ padding: '8px 12px', cursor: 'pointer', color: '#2563eb' }}>
+                {displayYName} {(sortField === 'yValue' || sortField === yVariable) && (sortAsc ? '↑' : '↓')}
               </th>
               {xVariable && xVariable !== 'work_completed' && (
                 <th onClick={() => toggleSort(xVariable)} style={{ padding: '8px 12px', cursor: 'pointer' }}>
-                  {xVariable}
+                  {displayXName} {sortField === xVariable && (sortAsc ? '↑' : '↓')}
                 </th>
               )}
               <th style={{ padding: '8px 12px' }}>Status</th>
@@ -276,6 +328,27 @@ export default function DataTable({
                       </button>
                     </div>
                   </td>
+                  {distinctDatasets.length > 1 && (
+                    <td style={{ padding: '8px 12px', whiteSpace: 'nowrap' }}>
+                      <span style={{
+                        display: 'inline-flex',
+                        alignItems: 'center',
+                        gap: '6px',
+                        fontSize: '0.78rem',
+                        fontWeight: '600',
+                        color: '#1e293b'
+                      }}>
+                        <span style={{
+                          width: '10px',
+                          height: '10px',
+                          borderRadius: '2px',
+                          backgroundColor: r.datasetColor || '#2563eb',
+                          flexShrink: 0
+                        }} />
+                        {r.datasetName}
+                      </span>
+                    </td>
+                  )}
                   <td style={{ padding: '8px 12px', whiteSpace: 'nowrap' }}>{r.date?.substring(0, 10)}</td>
                   <td style={{ padding: '8px 12px', fontWeight: '500' }}>{r.unit}</td>
                   <td style={{ padding: '8px 12px', color: '#475569', fontSize: '0.78rem' }}>{r.testList || '-'}</td>
@@ -288,11 +361,33 @@ export default function DataTable({
                   </td>
                   <td style={{ padding: '8px 12px' }}>{energy}</td>
                   <td style={{ padding: '8px 12px', fontWeight: '700', color: isIgnored ? '#94a3b8' : '#2563eb' }}>
-                    {r[yVariable] !== undefined ? r[yVariable] : '-'}
+                    {(() => {
+                      const val = r.y !== undefined ? r.y : (r[r.yVariable] ?? r[yVariable] ?? r[displayYName]);
+                      if (val === undefined || val === null || val === '') return '-';
+                      return (
+                        <div style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}>
+                          <span>{val}</span>
+                          {distinctYLabels.length > 1 && (r.yVariableLabel || r.yVariable) && (
+                            <span style={{
+                              fontSize: '0.70rem',
+                              fontWeight: '500',
+                              color: '#64748b',
+                              background: '#f1f5f9',
+                              padding: '1px 5px',
+                              borderRadius: '4px',
+                              border: '1px solid #e2e8f0',
+                              whiteSpace: 'nowrap'
+                            }}>
+                              {r.yVariableLabel || r.yVariable}
+                            </span>
+                          )}
+                        </div>
+                      );
+                    })()}
                   </td>
                   {xVariable && xVariable !== 'work_completed' && (
                     <td style={{ padding: '8px 12px' }}>
-                      {r[xVariable] !== undefined ? r[xVariable] : '-'}
+                      {r[xVariable] !== undefined ? r[xVariable] : (r[displayXName] !== undefined ? r[displayXName] : '-')}
                     </td>
                   )}
                   <td style={{ padding: '8px 12px' }}>

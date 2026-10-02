@@ -10,10 +10,30 @@ export default function DatasetComparisonTable({
   ignoredSessionIds = [],
   yVariable,
   xVariable,
+  yVariableLabel,
+  xVariableLabel,
   trendlineConfig,
   baselineConfig,
   onInspectSession
 }) {
+  const distinctYLabels = useMemo(() => {
+    const labels = new Set();
+    for (const ds of datasets) {
+      const res = datasetResults[ds.id];
+      const lbl = res?.yVariableLabel || ds.yVariableLabel || ds.yVariable;
+      if (lbl) labels.add(lbl);
+    }
+    return Array.from(labels);
+  }, [datasets, datasetResults]);
+
+  const displayYName = useMemo(() => {
+    if (distinctYLabels.length === 0) return yVariableLabel || yVariable || 'Value';
+    if (distinctYLabels.length === 1) return distinctYLabels[0];
+    if (distinctYLabels.length <= 3) return distinctYLabels.join(' / ');
+    return 'Multiple Variables';
+  }, [distinctYLabels, yVariableLabel, yVariable]);
+
+  const displayXName = xVariableLabel || (xVariable === 'work_completed' ? 'Date' : xVariable);
   const ignoredSet = useMemo(() => new Set(ignoredSessionIds), [ignoredSessionIds]);
   const isDateX = !xVariable || xVariable === 'work_completed';
   const [sortKey, setSortKey] = useState(null);
@@ -43,6 +63,10 @@ export default function DatasetComparisonTable({
         case 'name':
           valA = (a.name || '').toLowerCase();
           valB = (b.name || '').toLowerCase();
+          return sortOrder === 'asc' ? valA.localeCompare(valB) : valB.localeCompare(valA);
+        case 'variable':
+          valA = (resA?.yVariableLabel || a.yVariableLabel || a.yVariable || '').toLowerCase();
+          valB = (resB?.yVariableLabel || b.yVariableLabel || b.yVariable || '').toLowerCase();
           return sortOrder === 'asc' ? valA.localeCompare(valB) : valB.localeCompare(valA);
         case 'count':
           valA = statsA.count ?? -1;
@@ -88,12 +112,13 @@ export default function DatasetComparisonTable({
 
     const headers = [
       'Dataset Name',
+      'Variable',
       'Units',
       'Time Window',
       'Filters',
       'Active Points (N)',
       'Excluded Points',
-      `Mean (${yVariable})`,
+      `Mean (${displayYName})`,
       'Std Dev (sigma)',
       'Median',
       'Min',
@@ -108,6 +133,7 @@ export default function DatasetComparisonTable({
       const stats = res?.stats || {};
       const reg = res?.regression || {};
 
+      const varText = res?.yVariableLabel || ds.yVariableLabel || ds.yVariable || displayYName;
       const unitText = ds.units?.length > 0 ? ds.units.join('; ') : 'All Units';
       const dateText = ds.dateFrom || ds.dateTo ? `${ds.dateFrom || 'Start'} to ${ds.dateTo || 'Present'}` : 'All Time';
       const filterText = ds.filters?.length > 0
@@ -116,6 +142,7 @@ export default function DatasetComparisonTable({
 
       return [
         `"${ds.name}"`,
+        `"${varText}"`,
         `"${unitText}"`,
         `"${dateText}"`,
         `"${filterText}"`,
@@ -137,7 +164,7 @@ export default function DatasetComparisonTable({
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `dataset_comparison_${yVariable.replace(/\s+/g, '_')}_${new Date().toISOString().substring(0, 10)}.csv`;
+    a.download = `dataset_comparison_${displayYName.replace(/\s+/g, '_')}_${new Date().toISOString().substring(0, 10)}.csv`;
     a.click();
     URL.revokeObjectURL(url);
   };
@@ -178,7 +205,7 @@ export default function DatasetComparisonTable({
             Multi-Dataset Statistical Benchmarking & Comparison
           </h3>
           <span style={{ fontSize: '0.78rem', color: '#64748b' }}>
-            ({yVariable})
+            ({displayYName})
           </span>
         </div>
 
@@ -206,6 +233,7 @@ export default function DatasetComparisonTable({
           <thead>
             <tr style={{ borderBottom: '2px solid #e2e8f0', background: '#f8fafc', color: '#475569' }}>
               {renderHeader('name', 'Dataset', 'left')}
+              {renderHeader('variable', 'Variable', 'left')}
               <th style={{ padding: '10px 12px' }}>Scope / Filters</th>
               {renderHeader('count', 'Active N', 'right')}
               {renderHeader('mean', 'Mean (μ)', 'right')}
@@ -272,6 +300,22 @@ export default function DatasetComparisonTable({
                         </span>
                       )}
                     </div>
+                  </td>
+
+                  {/* Measurement Variable */}
+                  <td style={{ padding: '10px 12px', fontSize: '0.8rem', color: '#1e293b' }}>
+                    <span style={{
+                      background: '#eff6ff',
+                      color: '#1d4ed8',
+                      padding: '2px 8px',
+                      borderRadius: '4px',
+                      fontWeight: '600',
+                      fontSize: '0.75rem',
+                      border: '1px solid #bfdbfe',
+                      whiteSpace: 'nowrap'
+                    }}>
+                      {res?.yVariableLabel || ds.yVariableLabel || ds.yVariable || displayYName}
+                    </span>
                   </td>
 
                   {/* Scope summary */}
@@ -398,6 +442,7 @@ export default function DatasetComparisonTable({
         datasetResults={datasetResults}
         ignoredSessionIds={ignoredSessionIds}
         yVariable={yVariable}
+        yVariableLabel={displayYName}
         baselineConfig={baselineConfig}
         onInspectSession={onInspectSession}
       />
@@ -409,6 +454,8 @@ export default function DatasetComparisonTable({
         ignoredSessionIds={ignoredSessionIds}
         xVariable={xVariable}
         yVariable={yVariable}
+        xVariableLabel={displayXName}
+        yVariableLabel={displayYName}
       />
     </div>
   );

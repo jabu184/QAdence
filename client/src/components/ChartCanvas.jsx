@@ -202,6 +202,8 @@ export default function ChartCanvas({
   datasetResults = {},
   xVariable,
   yVariable,
+  xVariableLabel,
+  yVariableLabel,
   displayMode = 'scatter', // 'scatter', 'line', 'distribution', 'normal'
   trendlineConfig = { enabled: false, type: 'linear', windowSize: 5 },
   baselineConfig = { enabled: false, baseline: '', upperTol: '', lowerTol: '', symmetric: true },
@@ -217,6 +219,30 @@ export default function ChartCanvas({
   const chartRef = useRef(null);
   const [contextMenu, setContextMenu] = useState({ visible: false, x: 0, y: 0, point: null });
 
+  // Collect active points per visible dataset
+  const visibleDatasets = useMemo(() => {
+    return datasets.filter(d => d.visible !== false);
+  }, [datasets]);
+
+  const distinctYLabels = useMemo(() => {
+    const labels = new Set();
+    for (const ds of visibleDatasets) {
+      const res = datasetResults[ds.id];
+      const lbl = res?.yVariableLabel || ds.yVariableLabel || ds.yVariable;
+      if (lbl) labels.add(lbl);
+    }
+    return Array.from(labels);
+  }, [visibleDatasets, datasetResults]);
+
+  const displayYName = useMemo(() => {
+    if (distinctYLabels.length === 0) return yVariableLabel || yVariable || 'Value';
+    if (distinctYLabels.length === 1) return distinctYLabels[0];
+    if (distinctYLabels.length <= 3) return distinctYLabels.join(' / ');
+    return 'Multiple Variables';
+  }, [distinctYLabels, yVariableLabel, yVariable]);
+
+  const displayXName = xVariableLabel || (xVariable === 'work_completed' ? 'Date' : xVariable);
+
   useEffect(() => {
     const handleWindowClick = () => {
       setContextMenu(prev => (prev.visible ? { ...prev, visible: false } : prev));
@@ -226,11 +252,6 @@ export default function ChartCanvas({
   }, []);
 
   const ignoredSet = useMemo(() => new Set(ignoredSessionIds), [ignoredSessionIds]);
-
-  // Collect active points per visible dataset
-  const visibleDatasets = useMemo(() => {
-    return datasets.filter(d => d.visible !== false);
-  }, [datasets]);
 
   // Aggregate active points across all visible datasets
   const activeDatasetData = useMemo(() => {
@@ -333,7 +354,7 @@ export default function ChartCanvas({
       const url = chartRef.current.toBase64Image();
       const a = document.createElement('a');
       a.href = url;
-      a.download = `patient_qa_${yVariable.replace(/\s+/g, '_')}_vs_${xVariable.replace(/\s+/g, '_')}.png`;
+      a.download = `patient_qa_${displayYName.replace(/\s+/g, '_')}_vs_${displayXName.replace(/\s+/g, '_')}.png`;
       a.click();
     }
   };
@@ -391,7 +412,7 @@ export default function ChartCanvas({
         }
       },
       scales: {
-        x: { title: { display: true, text: `${yVariable} Range` } },
+        x: { title: { display: true, text: `${displayYName} Range` } },
         y: { title: { display: true, text: 'Number of Sessions' }, beginAtZero: true, ticks: { precision: 0 } }
       }
     };
@@ -518,7 +539,7 @@ export default function ChartCanvas({
         legend: { position: 'top' },
         tooltip: {
           callbacks: {
-            title: (items) => `${yVariable}: ${items[0].raw?.x}`,
+            title: (items) => `${displayYName}: ${items[0].raw?.x}`,
             label: (item) => `${item.dataset.label}: density ${Number(item.raw?.y).toFixed(4)}`
           }
         }
@@ -526,7 +547,7 @@ export default function ChartCanvas({
       scales: {
         x: {
           type: 'linear',
-          title: { display: true, text: `${yVariable} Value` }
+          title: { display: true, text: `${displayYName} Value` }
         },
         y: {
           type: 'linear',
@@ -779,7 +800,8 @@ export default function ChartCanvas({
                 ? (item.raw?.pointMeta?.date ? item.raw.pointMeta.date.substring(0, 10) : new Date(item.raw.x).toLocaleDateString())
                 : item.raw.x;
               const yVal = item.raw.y;
-              return `${isDateX ? 'Date' : xVariable}: ${xVal} | ${yVariable}: ${yVal}`;
+              const pointYName = item.raw?.pointMeta?.yVariableLabel || item.raw?.pointMeta?.yVariable || displayYName;
+              return `${isDateX ? 'Date' : displayXName}: ${xVal} | ${pointYName}: ${yVal}`;
             },
             afterLabel: () => [
               '💡 Click to view session details & test list',
@@ -793,7 +815,7 @@ export default function ChartCanvas({
           type: 'linear',
           title: {
             display: true,
-            text: isDateX ? 'Work Completed Date' : xVariable
+            text: isDateX ? 'Work Completed Date' : displayXName
           },
           ticks: isDateX ? {
             callback: (val) => {
@@ -807,7 +829,7 @@ export default function ChartCanvas({
           type: 'linear',
           title: {
             display: true,
-            text: yVariable
+            text: displayYName
           },
           suggestedMin: baselineInfo && (baselineInfo.lowerLimit !== null || baselineInfo.baseline !== null)
             ? Math.min(
@@ -942,7 +964,7 @@ export default function ChartCanvas({
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '0.75rem', flexWrap: 'wrap', gap: '0.5rem' }}>
           <div>
             <h3 style={{ fontSize: '1.05rem', fontWeight: '700', color: '#0f172a' }}>
-              {yVariable} {isDateX ? 'Over Time (Time-Series)' : `vs. ${xVariable}`}
+              {displayYName} {isDateX ? 'Over Time (Time-Series)' : `vs. ${displayXName}`}
             </h3>
             <p style={{ fontSize: '0.78rem', color: '#64748b' }}>
               Comparing <strong>{visibleDatasets.length}</strong> data set{visibleDatasets.length > 1 ? 's' : ''} ({totalActivePoints} active points) • Style: <strong style={{ textTransform: 'capitalize' }}>{displayMode}</strong>
@@ -1044,7 +1066,7 @@ export default function ChartCanvas({
                 )}
               </div>
               <p style={{ fontSize: '0.75rem', color: '#64748b', margin: 0 }}>
-                Set nominal target baseline and acceptable tolerance limits for {yVariable || 'measurement'}. Visible across time-series, normal curves, and box plots.
+                Set nominal target baseline and acceptable tolerance limits for {displayYName || 'measurement'}. Visible across time-series, normal curves, and box plots.
               </p>
             </div>
           </div>
@@ -1291,7 +1313,7 @@ export default function ChartCanvas({
             </div>
             <div>{contextMenu.point.unit} • {contextMenu.point.date?.substring(0, 10)}</div>
             <div style={{ color: '#2563eb', marginTop: '2px' }}>
-              {yVariable}: <strong>{contextMenu.point.y}</strong>
+              {contextMenu.point.yVariableLabel || contextMenu.point.yVariable || displayYName}: <strong>{contextMenu.point.y}</strong>
             </div>
           </div>
           <button

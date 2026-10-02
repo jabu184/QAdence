@@ -11,6 +11,8 @@ import SyncProgressModal from './components/SyncProgressModal';
 import SessionDetailsModal from './components/SessionDetailsModal';
 import { BarChart3, Table as TableIcon, RefreshCw } from 'lucide-react';
 import { calculateStats, computeLinearRegression, identifyOutlierSessionIds } from './utils/math';
+import { normalizeFilterGroups } from './utils/filterUtils';
+import { enrichTestsWithDisplayNames } from './utils/testGrouping';
 
 const DEFAULT_PALETTE = [
   '#2563eb', // Blue
@@ -33,6 +35,8 @@ export default function App() {
   const [years, setYears] = useState([]);
 
   // Multi-Dataset State
+  const [globalDateFrom, setGlobalDateFrom] = useState('');
+  const [globalDateTo, setGlobalDateTo] = useState('');
   const [datasets, setDatasets] = useState([
     {
       id: 'ds-1',
@@ -42,7 +46,10 @@ export default function App() {
       units: [],
       dateFrom: '',
       dateTo: '',
-      filters: []
+      filters: [],
+      yVariable: '',
+      selectedTestList: '',
+      includeAllInstances: true
     }
   ]);
   const [activeDatasetId, setActiveDatasetId] = useState('ds-1');
@@ -104,33 +111,41 @@ export default function App() {
   // Load Status & Schemas
   const loadMetadata = useCallback(async () => {
     try {
+      const t = Date.now();
+      const fetchOpts = { cache: 'no-store' };
       const [statusRes, unitsRes, unitClassesRes, testsRes, presetsRes, yearsRes, testListsRes] = await Promise.all([
-        fetch('/api/status').then(r => r.json()),
-        fetch('/api/schema/units').then(r => r.json()),
-        fetch('/api/schema/unit-classes').then(r => r.json()),
-        fetch('/api/schema/tests').then(r => r.json()),
-        fetch('/api/presets').then(r => r.json()),
-        fetch('/api/schema/years').then(r => r.json()),
-        fetch('/api/schema/test-lists').then(r => r.json())
+        fetch(`/api/status?_t=${t}`, fetchOpts).then(r => r.json()),
+        fetch(`/api/schema/units?_t=${t}`, fetchOpts).then(r => r.json()),
+        fetch(`/api/schema/unit-classes?_t=${t}`, fetchOpts).then(r => r.json()),
+        fetch(`/api/schema/tests?_t=${t}`, fetchOpts).then(r => r.json()),
+        fetch(`/api/presets?_t=${t}`, fetchOpts).then(r => r.json()),
+        fetch(`/api/schema/years?_t=${t}`, fetchOpts).then(r => r.json()),
+        fetch(`/api/schema/test-lists?_t=${t}`, fetchOpts).then(r => r.json())
       ]);
 
       setStatus(statusRes);
       setUnits(unitsRes || []);
       setUnitClasses(unitClassesRes || []);
-      setTests(testsRes || []);
+      const enrichedTests = enrichTestsWithDisplayNames(testsRes || []);
+      setTests(enrichedTests);
       setPresets(presetsRes || []);
       setYears(yearsRes || []);
       setTestLists(testListsRes || []);
 
-      const numerics = (testsRes || []).filter(t => t.isNumeric);
+      const numerics = enrichedTests.filter(t => t.isNumeric);
       if (numerics.length > 0) {
+        const defaultY = numerics[0].slug || numerics[0].name;
         setYVariable(prevY => {
-          if (prevY && numerics.some(t => t.name === prevY)) return prevY;
-          return numerics[0].name;
+          if (prevY && numerics.some(t => (t.slug && t.slug === prevY) || t.name === prevY)) return prevY;
+          return defaultY;
         });
+        setDatasets(prev => prev.map(d => ({
+          ...d,
+          yVariable: d.yVariable || defaultY
+        })));
         setXVariable(prevX => {
           if (prevX === 'work_completed') return 'work_completed';
-          if (prevX && numerics.some(t => t.name === prevX)) return prevX;
+          if (prevX && numerics.some(t => (t.slug && t.slug === prevX) || t.name === prevX)) return prevX;
           return 'work_completed';
         });
       }
@@ -153,9 +168,12 @@ export default function App() {
       color: nextColor,
       visible: true,
       units: [],
-      dateFrom: '',
-      dateTo: '',
-      filters: []
+      dateFrom: globalDateFrom,
+      dateTo: globalDateTo,
+      filters: [],
+      yVariable: yVariable,
+      selectedTestList: selectedTestList,
+      includeAllInstances: includeAllInstances
     };
     setDatasets(prev => [...prev, newDs]);
     setActiveDatasetId(newId);
@@ -183,11 +201,38 @@ export default function App() {
       ...orig,
       id: newId,
       name: `${orig.name} (Copy)`,
-      color: nextColor
+      color: nextColor,
+      yVariable: orig.yVariable || yVariable,
+      selectedTestList: orig.selectedTestList !== undefined ? orig.selectedTestList : selectedTestList,
+      includeAllInstances: orig.includeAllInstances !== undefined ? orig.includeAllInstances : includeAllInstances
     };
     setDatasets(prev => [...prev, newDs]);
     setActiveDatasetId(newId);
   };
+
+  // Bulk Handlers: Apply Date Window to All Datasets
+  const handleApplyDatesToAll = useCallback((dateFrom, dateTo) => {
+    setGlobalDateFrom(dateFrom);
+    setGlobalDateTo(dateTo);
+    setDatasets(prev => prev.map(d => ({ ...d, dateFrom, dateTo })));
+    setIsConfigStale(true);
+  }, []);
+
+  // Bulk Handlers: Update Measurement Variable across All Datasets
+  const handleChangeYVariableForAll = useCallback((newVar, newList) => {
+    setYVariable(newVar);
+    if (newList !== undefined) {
+      setSelectedTestList(newList);
+      setIncludeAllInstances(newList === '');
+    }
+    setDatasets(prev => prev.map(d => ({
+      ...d,
+      yVariable: newVar,
+      selectedTestList: newList !== undefined ? newList : d.selectedTestList,
+      includeAllInstances: newList !== undefined ? (newList === '') : d.includeAllInstances
+    })));
+    setIsConfigStale(true);
+  }, []);
 
   const handleToggleDatasetVisibility = (id) => {
     setDatasets(prev => prev.map(d => (d.id === id ? { ...d, visible: !d.visible } : d)));
@@ -198,13 +243,22 @@ export default function App() {
     const orig = datasets.find(d => d.id === datasetId) || datasets[0];
     if (!orig) return;
 
-    // Retain other filters not matching testName
-    const otherFilters = (orig.filters || []).filter(f => f.testName !== testName);
+    const norm = normalizeFilterGroups(orig.filters);
+    // Remove conditions matching testName from existing groups
+    const filteredGroups = norm.groups.map(g => ({
+      ...g,
+      conditions: g.conditions.filter(c => c.testName !== testName)
+    })).filter(g => g.conditions.length > 0);
 
     // Create a new dataset for each distinct value
     const generated = values.map((val, idx) => {
       const color = DEFAULT_PALETTE[(datasets.length + idx) % DEFAULT_PALETTE.length];
       const baseName = orig.name && !orig.name.startsWith('Data Set') ? `${orig.name} - ` : '';
+      const splitGroup = {
+        id: `grp-split-${Date.now()}-${idx}`,
+        logic: 'and',
+        conditions: [{ testName, operator: 'equals', value: String(val) }]
+      };
       return {
         id: `ds-${Date.now()}-${idx}-${Math.random().toString(36).substring(2, 6)}`,
         name: baseName ? `${baseName}${val}` : `${testName}: ${val}`,
@@ -213,10 +267,10 @@ export default function App() {
         units: [...(orig.units || [])],
         dateFrom: orig.dateFrom || '',
         dateTo: orig.dateTo || '',
-        filters: [
-          ...otherFilters,
-          { testName, operator: 'equals', value: String(val) }
-        ]
+        filters: {
+          groupLogic: norm.groupLogic || 'and',
+          groups: [...filteredGroups, splitGroup]
+        }
       };
     });
 
@@ -243,7 +297,7 @@ export default function App() {
     // Otherwise split by unitNames provided (or all active units from metadata)
     let targets = (orig.units && orig.units.length > 0) ? orig.units : (unitNames || []);
     if (!targets || targets.length === 0) {
-      targets = units.filter(u => u.active !== 0).map(u => u.name);
+      targets = units.map(u => u.name);
     }
 
     if (targets.length <= 1) {
@@ -334,13 +388,26 @@ export default function App() {
 
   const handleToggleIncludeAllInstances = useCallback((checked) => {
     setIncludeAllInstances(checked);
-    if (!checked && !selectedTestList) {
-      const match = tests.find(t => t.isNumeric && t.name === yVariable);
-      if (match) {
-        setSelectedTestList(match.testList || 'General QA');
-      }
+    if (!checked) {
+      setSelectedTestList(prev => {
+        if (prev) return prev;
+        const match = tests.find(t => t.isNumeric && ((t.slug && t.slug === yVariable) || t.name === yVariable));
+        return match?.testList || 'General QA';
+      });
     }
-  }, [selectedTestList, tests, yVariable]);
+  }, [tests, yVariable]);
+
+  const handleSelectVariable = useCallback(({ name, list }) => {
+    if (!name) return;
+    setYVariable(name);
+    if (!list) {
+      setSelectedTestList('');
+      setIncludeAllInstances(true);
+    } else {
+      setSelectedTestList(list);
+      setIncludeAllInstances(false);
+    }
+  }, []);
 
   // In-memory query cache for instantaneous preset toggling and repeated local queries
   const queryCacheRef = useRef(new Map());
@@ -351,7 +418,8 @@ export default function App() {
       : (ds.testLists || []);
     const uKey = (ds.units || []).slice().sort().join(',');
     const tlKey = effLists.slice().sort().join(',');
-    const fKey = (ds.filters || []).map(f => `${f.testName}:${f.operator}:${f.value}`).join(';');
+    const norm = normalizeFilterGroups(ds.filters);
+    const fKey = `${norm.groupLogic}:` + norm.groups.map(g => `${g.logic}(` + g.conditions.map(c => `${c.testName}:${c.operator}:${c.value}`).join(',') + `)`).join(';');
     return `${effectiveY}|${effectiveX || 'work_completed'}|${effectiveIncludeAll ? '1' : '0'}|${effectiveSelectedTestList || ''}|${status?.qatrack?.includeUnapproved ? '1' : '0'}|${uKey}|${tlKey}|${ds.dateFrom || ''}|${ds.dateTo || ''}|${fKey}`;
   };
 
@@ -384,41 +452,47 @@ export default function App() {
       for (const ds of effDatasets) {
         if (ds.visible === false) continue;
 
-      let allPts = [];
-      let tableRows = [];
-      let needsPull = false;
+        const dsY = ds.yVariable || effectiveY;
+        const dsList = ds.selectedTestList !== undefined ? ds.selectedTestList : effectiveSelectedTestList;
+        const dsIncludeAll = ds.includeAllInstances !== undefined ? ds.includeAllInstances : effectiveIncludeAll;
 
-      const cacheKey = getQueryCacheKey(ds, effectiveX, effectiveY, effectiveSelectedTestList, effectiveIncludeAll);
+        if (!dsY) continue;
 
-      if (queryCacheRef.current.has(cacheKey)) {
-        const cached = queryCacheRef.current.get(cacheKey);
-        allPts = cached.dataPoints;
-        tableRows = cached.tableRows;
-        needsPull = cached.needsPull;
-      } else {
-        try {
-          const effectiveTestLists = !effectiveIncludeAll && effectiveSelectedTestList
-            ? [effectiveSelectedTestList]
-            : (ds.testLists || []);
+        let allPts = [];
+        let tableRows = [];
+        let needsPull = false;
 
-          const res = await fetch('/api/query', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              units: ds.units,
-              testLists: effectiveTestLists,
-              testList: !effectiveIncludeAll ? effectiveSelectedTestList : '',
-              includeAllInstances: effectiveIncludeAll,
-              includeUnapproved: status?.qatrack?.includeUnapproved ?? true,
-              includeRejected: status?.qatrack?.includeRejected ?? false,
-              dateFrom: ds.dateFrom,
-              dateTo: ds.dateTo,
-              filters: ds.filters,
-              xVariable: effectiveX,
-              yVariable: effectiveY,
-              pullOnDemand
-            })
-          });
+        const cacheKey = getQueryCacheKey(ds, effectiveX, dsY, dsList, dsIncludeAll);
+
+        if (queryCacheRef.current.has(cacheKey)) {
+          const cached = queryCacheRef.current.get(cacheKey);
+          allPts = cached.dataPoints;
+          tableRows = cached.tableRows;
+          needsPull = cached.needsPull;
+        } else {
+          try {
+            const effectiveTestLists = !dsIncludeAll && dsList
+              ? [dsList]
+              : (ds.testLists || []);
+
+            const res = await fetch('/api/query', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                units: ds.units,
+                testLists: effectiveTestLists,
+                testList: !dsIncludeAll ? dsList : '',
+                includeAllInstances: dsIncludeAll,
+                includeUnapproved: status?.qatrack?.includeUnapproved ?? true,
+                includeRejected: status?.qatrack?.includeRejected ?? false,
+                dateFrom: ds.dateFrom,
+                dateTo: ds.dateTo,
+                filters: normalizeFilterGroups(ds.filters),
+                xVariable: effectiveX,
+                yVariable: dsY,
+                pullOnDemand
+              })
+            });
           const data = await res.json();
           allPts = data.dataPoints || [];
           tableRows = data.tableRows || [];
@@ -445,20 +519,34 @@ export default function App() {
       const isDateX = !effectiveX || effectiveX === 'work_completed';
       const regression = computeLinearRegression(activePts, isDateX);
 
-      nextResults[ds.id] = {
-        dataPoints: allPts,
-        tableRows: tableRows.map(r => ({
-          ...r,
-          datasetName: ds.name,
-          datasetColor: ds.color
-        })),
-        stats,
-        regression,
-        ignoredCount: allPts.length - activePts.length
-      };
-    }
+        // Resolve friendly label for this dataset's variable
+        const dsTestObj = tests.find(t => (t.slug && t.slug === dsY) || t.name === dsY);
+        const dsYLabel = dsTestObj?.displayNameWithMacro || dsTestObj?.displayName || dsTestObj?.name || dsY;
 
-    setDatasetResults(nextResults);
+        nextResults[ds.id] = {
+          dataPoints: allPts.map(p => ({
+            ...p,
+            datasetName: ds.name,
+            datasetColor: ds.color,
+            yVariable: dsY,
+            yVariableLabel: dsYLabel
+          })),
+          tableRows: tableRows.map(r => ({
+            ...r,
+            datasetName: ds.name,
+            datasetColor: ds.color,
+            yVariable: dsY,
+            yVariableLabel: dsYLabel
+          })),
+          stats,
+          regression,
+          ignoredCount: allPts.length - activePts.length,
+          yVariable: dsY,
+          yVariableLabel: dsYLabel
+        };
+      }
+
+      setDatasetResults(nextResults);
       loadedConfigRef.current = JSON.stringify({
         xVariable: effectiveX,
         yVariable: effectiveY,
@@ -466,14 +554,13 @@ export default function App() {
         includeAllInstances: effectiveIncludeAll,
         datasets: activeDatasets.map(d => ({
           id: d.id,
+          yVariable: d.yVariable || effectiveY,
+          selectedTestList: d.selectedTestList || '',
+          includeAllInstances: d.includeAllInstances ?? true,
           units: [...(d.units || [])].sort(),
           dateFrom: d.dateFrom || '',
           dateTo: d.dateTo || '',
-          filters: (d.filters || []).map(f => ({
-            testName: f.testName,
-            operator: f.operator,
-            value: f.value
-          }))
+          filters: normalizeFilterGroups(d.filters)
         }))
       });
       setIsConfigStale(false);
@@ -485,7 +572,7 @@ export default function App() {
     } finally {
       setIsLoading(false);
     }
-  }, [datasets, xVariable, yVariable, selectedTestList, ignoredSessionIds, includeAllInstances]);
+  }, [datasets, xVariable, yVariable, selectedTestList, ignoredSessionIds, includeAllInstances, tests, status]);
 
   const handleToggleIncludeUnapproved = useCallback(async (checked) => {
     try {
@@ -524,11 +611,7 @@ export default function App() {
         units: [...(d.units || [])].sort(),
         dateFrom: d.dateFrom || '',
         dateTo: d.dateTo || '',
-        filters: (d.filters || []).map(f => ({
-          testName: f.testName,
-          operator: f.operator,
-          value: f.value
-        }))
+        filters: normalizeFilterGroups(d.filters)
       }))
     });
   }, [xVariable, yVariable, selectedTestList, includeAllInstances, baselineConfig, datasets]);
@@ -540,7 +623,7 @@ export default function App() {
     if (!includeAllInstances && selectedTestList) {
       targetLists = [selectedTestList];
     } else {
-      const matchingDefs = tests.filter(t => t.name === yVariable);
+      const matchingDefs = tests.filter(t => (t.slug && t.slug === yVariable) || t.name === yVariable);
       targetLists = [...new Set(matchingDefs.map(t => t.testList).filter(Boolean))];
     }
     if (targetLists.length === 0) return tests;
@@ -554,11 +637,24 @@ export default function App() {
   // If X-variable is numeric and no longer exists in the scoped test list, reset to work_completed
   useEffect(() => {
     if (xVariable && xVariable !== 'work_completed' && scopedNumericTests.length > 0) {
-      if (!scopedNumericTests.some(t => t.name === xVariable)) {
+      if (!scopedNumericTests.some(t => (t.slug && t.slug === xVariable) || t.name === xVariable)) {
         setXVariable('work_completed');
       }
     }
   }, [scopedNumericTests, xVariable]);
+
+  const currentYTest = useMemo(() => {
+    if (!yVariable || yVariable === 'work_completed') return null;
+    return tests.find(t => (t.slug && t.slug === yVariable) || t.name === yVariable);
+  }, [yVariable, tests]);
+
+  const currentXTest = useMemo(() => {
+    if (!xVariable || xVariable === 'work_completed') return null;
+    return tests.find(t => (t.slug && t.slug === xVariable) || t.name === xVariable);
+  }, [xVariable, tests]);
+
+  const yVariableLabel = currentYTest?.displayNameWithMacro || currentYTest?.displayName || currentYTest?.name || yVariable;
+  const xVariableLabel = currentXTest?.displayNameWithMacro || currentXTest?.displayName || currentXTest?.name || xVariable;
 
   // Track configuration changes without false triggers by comparing against loaded snapshot
   useEffect(() => {
@@ -610,7 +706,10 @@ export default function App() {
 
       let nextDatasets = datasets;
       if (cfg.datasets && Array.isArray(cfg.datasets)) {
-        nextDatasets = cfg.datasets;
+        nextDatasets = cfg.datasets.map(d => ({
+          ...d,
+          filters: normalizeFilterGroups(d.filters)
+        }));
       } else if (cfg.filters || cfg.units) {
         // Fallback for single-dataset presets
         nextDatasets = [
@@ -622,7 +721,7 @@ export default function App() {
             units: cfg.units || [],
             dateFrom: cfg.dateFrom || '',
             dateTo: cfg.dateTo || '',
-            filters: cfg.filters || []
+            filters: normalizeFilterGroups(cfg.filters)
           }
         ];
       }
@@ -834,9 +933,12 @@ export default function App() {
     let targetLists = [];
     if (!effectiveIncludeAll && effectiveTestList) {
       targetLists = [effectiveTestList];
+    } else if (options.testListNames && options.testListNames.length > 0) {
+      targetLists = options.testListNames;
     } else {
-      const matchingDefs = tests.filter(t => t.name === effectiveY);
-      targetLists = [...new Set(matchingDefs.map(t => t.testList).filter(Boolean))];
+      // When includeAllInstances is active or no specific test list is chosen,
+      // pass empty array so backend retrieves data across all test lists that measure QA data.
+      targetLists = [];
     }
 
     // Filter out generic placeholder if specific lists exist
@@ -844,17 +946,14 @@ export default function App() {
       targetLists = targetLists.filter(l => l !== 'General QA');
     }
 
-    // Collect specific units if specified in active datasets (preserve explicit selections)
-    const specifiedUnits = [...new Set(activeDatasets.flatMap(d => d.units || []))];
-    const allUnits = specifiedUnits.length > 0
-      ? specifiedUnits
-      : units.filter(u => u.active !== 0).map(u => u.name);
+    // Only constrain units if explicitly passed in options.unitNames.
+    // Otherwise pass [] so QA data across all machines is imported into the local SQLite database.
+    const allUnits = options.unitNames && Array.isArray(options.unitNames) ? options.unitNames : [];
 
-    // Collect date boundaries across active datasets if specified
-    const dateFroms = activeDatasets.map(d => d.dateFrom).filter(Boolean);
-    const dateTos = activeDatasets.map(d => d.dateTo).filter(Boolean);
-    const minDateFrom = dateFroms.length > 0 ? dateFroms.sort()[0] : undefined;
-    const maxDateTo = dateTos.length > 0 ? dateTos.sort().reverse()[0] : undefined;
+    // Note: Do not constrain date boundaries when pulling from QATrack+ so older historical sessions
+    // and newly entered QA sessions from today are never artificially excluded by an active dataset view filter.
+    const effectiveDateFrom = options.dateFrom !== undefined ? options.dateFrom : undefined;
+    const effectiveDateTo = options.dateTo !== undefined ? options.dateTo : undefined;
 
     // Invalidate in-memory query cache so newly fetched records from QATrack are loaded
     queryCacheRef.current.clear();
@@ -863,8 +962,8 @@ export default function App() {
       mode: 'ondemand',
       testListNames: targetLists,
       unitNames: allUnits,
-      dateFrom: minDateFrom,
-      dateTo: maxDateTo,
+      dateFrom: effectiveDateFrom,
+      dateTo: effectiveDateTo,
       yVariable: effectiveY,
       includeUnapproved: options.includeUnapproved !== undefined ? options.includeUnapproved : (status?.qatrack?.includeUnapproved ?? true),
       includeRejected: options.includeRejected !== undefined ? options.includeRejected : (status?.qatrack?.includeRejected ?? false),
@@ -1008,6 +1107,8 @@ export default function App() {
           onChangeXVariable={setXVariable}
           yVariable={yVariable}
           onChangeYVariable={setYVariable}
+          onChangeYVariableForAll={handleChangeYVariableForAll}
+          onSelectVariable={handleSelectVariable}
           selectedTestList={selectedTestList}
           onChangeSelectedTestList={setSelectedTestList}
           includeAllInstances={includeAllInstances}
@@ -1018,6 +1119,9 @@ export default function App() {
           onChangeDisplayMode={setDisplayMode}
           trendlineConfig={trendlineConfig}
           onChangeTrendlineConfig={setTrendlineConfig}
+          globalDateFrom={globalDateFrom}
+          globalDateTo={globalDateTo}
+          onChangeGlobalDates={handleApplyDatesToAll}
           onRetrieveData={handleRunLocalQuery}
           onRunLocalQuery={handleRunLocalQuery}
           onFetchFromQATrack={handleFetchFromQATrack}
@@ -1082,6 +1186,8 @@ export default function App() {
               datasetResults={datasetResults}
               xVariable={xVariable}
               yVariable={yVariable}
+              xVariableLabel={xVariableLabel}
+              yVariableLabel={yVariableLabel}
               displayMode={displayMode}
               trendlineConfig={trendlineConfig}
               baselineConfig={baselineConfig}
@@ -1104,6 +1210,8 @@ export default function App() {
               ignoredSessionIds={ignoredSessionIds}
               yVariable={yVariable}
               xVariable={xVariable}
+              xVariableLabel={xVariableLabel}
+              yVariableLabel={yVariableLabel}
               trendlineConfig={trendlineConfig}
               baselineConfig={baselineConfig}
               onInspectSession={setInspectedSessionId}
@@ -1114,6 +1222,8 @@ export default function App() {
             tableRows={combinedTableRows}
             yVariable={yVariable}
             xVariable={xVariable}
+            xVariableLabel={xVariableLabel}
+            yVariableLabel={yVariableLabel}
             ignoredSessionIds={ignoredSessionIds}
             onToggleIgnore={handleToggleIgnore}
             onInspectSession={setInspectedSessionId}

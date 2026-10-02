@@ -31,6 +31,15 @@ try {
   execSync('powershell -NoProfile -Command "& { Get-Process -Name node -ErrorAction SilentlyContinue | ForEach-Object { if ($_.Path -and $_.Path -like \'*standalone*\') { Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue } } }"', { stdio: 'ignore' });
 } catch (_) {}
 
+// Preserve existing standalone data (user database & settings) if present
+const standaloneDataDir = path.join(standaloneDir, 'data');
+const tempBackupDataDir = path.join(rootDir, '.temp_standalone_data_backup');
+if (fs.existsSync(path.join(standaloneDataDir, 'patient_qa.db'))) {
+  try {
+    fs.cpSync(standaloneDataDir, tempBackupDataDir, { recursive: true });
+  } catch (_) {}
+}
+
 if (fs.existsSync(standaloneDir)) {
   console.log('Cleaning previous standalone directory...');
   fs.rmSync(standaloneDir, { recursive: true, force: true });
@@ -98,9 +107,15 @@ fs.cpSync(path.join(rootDir, 'node_modules'), path.join(standaloneDir, 'node_mod
 // 8. Copy package.json
 fs.copyFileSync(path.join(rootDir, 'package.json'), path.join(standaloneDir, 'package.json'));
 
-// 9. Copy database
-console.log('Copying initial database...');
-fs.cpSync(path.join(rootDir, 'data'), path.join(standaloneDir, 'data'), { recursive: true });
+// 9. Restore or Copy database
+console.log('Setting up standalone database...');
+if (fs.existsSync(tempBackupDataDir)) {
+  fs.cpSync(tempBackupDataDir, path.join(standaloneDir, 'data'), { recursive: true });
+  fs.rmSync(tempBackupDataDir, { recursive: true, force: true });
+  console.log('Preserved existing standalone database and settings.');
+} else {
+  fs.cpSync(path.join(rootDir, 'data'), path.join(standaloneDir, 'data'), { recursive: true });
+}
 
 // 10. Bundle Portable Python Runtime with NumPy and SciPy
 console.log('Bundling portable Python statistical runtime (NumPy & SciPy)...');

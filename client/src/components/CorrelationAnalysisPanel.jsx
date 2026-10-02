@@ -6,8 +6,12 @@ export default function CorrelationAnalysisPanel({
   datasetResults = {},
   ignoredSessionIds = [],
   xVariable,
-  yVariable
+  yVariable,
+  xVariableLabel,
+  yVariableLabel
 }) {
+  const displayYName = yVariableLabel || yVariable;
+  const displayXName = xVariableLabel || (xVariable === 'work_completed' ? 'Date' : xVariable);
   const isDualNumeric = Boolean(xVariable && xVariable !== 'work_completed' && yVariable);
   const [measureMode, setMeasureMode] = useState('all'); // 'all', 'pearson', 'nonparametric'
   const [analysisResult, setAnalysisResult] = useState(null);
@@ -48,8 +52,8 @@ export default function CorrelationAnalysisPanel({
     if (totalPts < 3) {
       setAnalysisResult({
         success: true,
-        xName: xVariable,
-        yName: yVariable,
+        xName: displayXName,
+        yName: displayYName,
         datasets: datasetPayloads.map(d => ({
           id: d.id,
           name: d.name,
@@ -71,8 +75,8 @@ export default function CorrelationAnalysisPanel({
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           datasets: datasetPayloads,
-          xName: xVariable,
-          yName: yVariable,
+          xName: displayXName,
+          yName: displayYName,
           measure: measureMode
         })
       });
@@ -194,7 +198,7 @@ export default function CorrelationAnalysisPanel({
               Statistical Correlation & Dependence Analysis
             </h4>
             <div style={{ fontSize: '0.75rem', color: '#64748b' }}>
-              Comparing <strong>{xVariable}</strong> (X-Axis) vs. <strong>{yVariable}</strong> (Y-Axis)
+              Comparing <strong>{displayXName}</strong> (X-Axis) vs. <strong>{displayYName}</strong> (Y-Axis)
             </div>
           </div>
         </div>

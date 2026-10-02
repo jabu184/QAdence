@@ -5,6 +5,14 @@ const qatrackClient = require('../qatrackClient');
 const path = require('path');
 const fs = require('fs');
 
+// Ensure no browser, WebView, or proxy caches any API endpoint
+router.use((req, res, next) => {
+  res.set('Cache-Control', 'no-store, no-cache, must-revalidate, private');
+  res.set('Pragma', 'no-cache');
+  res.set('Expires', '0');
+  next();
+});
+
 // 1. App Status & Health
 router.get('/status', (req, res) => {
   try {
@@ -12,7 +20,7 @@ router.get('/status', (req, res) => {
     const testValCount = db.prepare('SELECT COUNT(*) as count FROM test_values').get().count;
     const unitCount = db.prepare('SELECT COUNT(*) as count FROM units').get().count;
     const presetCount = db.prepare('SELECT COUNT(*) as count FROM presets').get().count;
-    const lastSession = db.prepare('SELECT work_completed FROM sessions ORDER BY work_completed DESC LIMIT 1').get();
+    const lastSession = db.prepare('SELECT COALESCE(work_started, work_completed) as session_date FROM sessions ORDER BY COALESCE(work_started, work_completed) DESC LIMIT 1').get();
 
     const config = qatrackClient.getConfig();
 
@@ -24,7 +32,7 @@ router.get('/status', (req, res) => {
         testValCount,
         unitCount,
         presetCount,
-        latestSessionDate: lastSession ? lastSession.work_completed : null
+        latestSessionDate: lastSession ? lastSession.session_date : null
       },
       qatrack: {
         configured: !!(config.baseUrl && config.hasToken),
@@ -322,7 +330,6 @@ router.get('/schema/units', (req, res) => {
         COALESCE(u.unit_type, '') as unitType,
         u.active as active
       FROM units u
-      WHERE u.active = 1 OR u.name IN (SELECT DISTINCT unit_name FROM sessions)
       UNION
       SELECT 
         s.unit_name as name,
@@ -346,7 +353,7 @@ router.get('/schema/unit-classes', (req, res) => {
     const rows = db.prepare(`
       SELECT DISTINCT COALESCE(unit_class, 'Linac') as unitClass
       FROM units
-      WHERE active = 1 AND unit_class IS NOT NULL AND unit_class != ''
+      WHERE unit_class IS NOT NULL AND unit_class != ''
       ORDER BY unitClass ASC
     `).all();
 
@@ -364,9 +371,9 @@ router.get('/schema/unit-classes', (req, res) => {
 router.get('/schema/years', (req, res) => {
   try {
     const rows = db.prepare(`
-      SELECT DISTINCT strftime('%Y', work_completed) as year
+      SELECT DISTINCT strftime('%Y', COALESCE(work_started, work_completed)) as year
       FROM sessions
-      WHERE work_completed IS NOT NULL AND work_completed != ''
+      WHERE COALESCE(work_started, work_completed) IS NOT NULL AND COALESCE(work_started, work_completed) != ''
       ORDER BY year DESC
     `).all();
     const currentYear = String(new Date().getFullYear());
@@ -381,28 +388,23 @@ router.get('/schema/years', (req, res) => {
 });
 
 // 6c. Schema Discovery: Test Lists (Ordered Alphabetically)
-// Strictly exclude test lists with no data (or active assignments)
+// Include all test lists from sessions, unit test collections, and test list definitions
 router.get('/schema/test-lists', (req, res) => {
   try {
-    const sessionCount = db.prepare('SELECT COUNT(*) as count FROM sessions').get()?.count || 0;
-    let rows;
-    if (sessionCount > 0) {
-      // If data exists in the database, strictly return test lists that have data!
-      rows = db.prepare(`
-        SELECT DISTINCT test_list_name as name
-        FROM sessions
-        WHERE test_list_name IS NOT NULL AND test_list_name != ''
-        ORDER BY name COLLATE NOCASE ASC
-      `).all();
-    } else {
-      // If no sessions yet, only return test lists with active assignments on active units
-      rows = db.prepare(`
-        SELECT DISTINCT test_list_name as name
-        FROM unit_test_collections
-        WHERE (active = 1 OR unit_name IN (SELECT DISTINCT unit_name FROM sessions)) AND unit_name IS NOT NULL AND unit_name != ''
-        ORDER BY name COLLATE NOCASE ASC
-      `).all();
-    }
+    const rows = db.prepare(`
+      SELECT DISTINCT test_list_name as name
+      FROM sessions
+      WHERE test_list_name IS NOT NULL AND test_list_name != ''
+      UNION
+      SELECT DISTINCT utc.test_list_name as name
+      FROM unit_test_collections utc
+      WHERE utc.test_list_name IS NOT NULL AND utc.test_list_name != ''
+      UNION
+      SELECT DISTINCT name
+      FROM test_lists
+      WHERE name IS NOT NULL AND name != ''
+      ORDER BY name COLLATE NOCASE ASC
+    `).all();
     res.json(rows.map(r => r.name));
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -415,6 +417,7 @@ router.get('/schema/tests', (req, res) => {
     const ingested = db.prepare(`
       SELECT
         tv.test_name,
+        tv.test_slug,
         COALESCE(s.test_list_name, 'General QA') as test_list_name,
         COUNT(*) as total_count,
         COUNT(tv.value_numeric) as numeric_count,
@@ -422,27 +425,25 @@ router.get('/schema/tests', (req, res) => {
         MAX(tv.unit) as unit
       FROM test_values tv
       LEFT JOIN sessions s ON tv.session_id = s.id
-      GROUP BY tv.test_name, s.test_list_name
+      GROUP BY tv.test_name, tv.test_slug, s.test_list_name
     `).all();
 
     let definitions = [];
     try {
       definitions = db.prepare(`
-        SELECT name as test_name, COALESCE(test_list_name, 'General QA') as test_list_name, unit, is_numeric
+        SELECT name as test_name, slug as test_slug, COALESCE(test_list_name, 'General QA') as test_list_name, unit, is_numeric
         FROM test_definitions
-        WHERE test_list_name IN (
-          SELECT DISTINCT test_list_name FROM sessions WHERE test_list_name IS NOT NULL AND test_list_name != ''
-          UNION
-          SELECT DISTINCT test_list_name FROM unit_test_collections WHERE (active = 1 OR unit_name IN (SELECT DISTINCT unit_name FROM sessions)) AND unit_name IS NOT NULL AND unit_name != ''
-        )
+        WHERE test_list_name IS NOT NULL AND test_list_name != ''
       `).all();
     } catch (_) {}
 
     const map = new Map();
     for (const d of definitions) {
-      const key = `${d.test_name}::${d.test_list_name}`;
+      const slug = d.test_slug || '';
+      const key = `${d.test_name}::${slug}::${d.test_list_name}`;
       map.set(key, {
         name: d.test_name,
+        slug: slug,
         testList: d.test_list_name,
         unit: d.unit || '',
         isNumeric: d.is_numeric === 1,
@@ -452,17 +453,26 @@ router.get('/schema/tests', (req, res) => {
     }
 
     for (const t of ingested) {
-      const key = `${t.test_name}::${t.test_list_name}`;
-      const existing = map.get(key);
+      const slug = t.test_slug || '';
+      const key = `${t.test_name}::${slug}::${t.test_list_name}`;
+      let existing = map.get(key);
+      if (!existing && slug) {
+        const fallbackKey = `${t.test_name}::::${t.test_list_name}`;
+        if (map.has(fallbackKey)) {
+          existing = map.get(fallbackKey);
+          map.delete(fallbackKey);
+        }
+      }
       const isNumericFromIngest = t.numeric_count > 0 && (t.numeric_count >= t.total_count * 0.25 || t.numeric_count >= 1);
       const isNumeric = existing ? (existing.isNumeric || isNumericFromIngest) : isNumericFromIngest;
       map.set(key, {
         name: t.test_name,
+        slug: slug || existing?.slug || '',
         testList: t.test_list_name || 'General QA',
         unit: t.unit || existing?.unit || '',
         isNumeric: Boolean(isNumeric),
-        totalCount: t.total_count,
-        numericCount: t.numeric_count
+        totalCount: (existing?.totalCount || 0) + t.total_count,
+        numericCount: (existing?.numericCount || 0) + t.numeric_count
       });
     }
 
@@ -481,16 +491,16 @@ router.get('/schema/tests', (req, res) => {
 // 8. Schema Discovery: Distinct values for a categorical test
 router.get('/schema/test-values', (req, res) => {
   try {
-    const testName = req.query.test_name;
+    const testName = req.query.test_name || req.query.testName;
     if (!testName) return res.json([]);
 
     const rows = db.prepare(`
       SELECT DISTINCT value_string
       FROM test_values
-      WHERE test_name = ? AND value_string IS NOT NULL AND value_string != ''
+      WHERE (test_slug = ? OR test_name = ?) AND value_string IS NOT NULL AND value_string != ''
       ORDER BY value_string
       LIMIT 100
-    `).all(testName);
+    `).all(testName, testName);
 
     res.json(rows.map(r => r.value_string));
   } catch (err) {
@@ -556,15 +566,15 @@ router.post('/query', async (req, res) => {
       } else if (!includeAllInstances && req.body.testList) {
         targetLists = [req.body.testList];
       } else {
-        const defRows = db.prepare('SELECT DISTINCT test_list_name FROM test_definitions WHERE name = ?').all(yVariable);
+        const defRows = db.prepare('SELECT DISTINCT test_list_name FROM test_definitions WHERE slug = ? OR name = ?').all(yVariable, yVariable);
         targetLists = defRows.map(r => r.test_list_name).filter(Boolean);
         if (targetLists.length === 0) {
           const sessRows = db.prepare(`
             SELECT DISTINCT s.test_list_name 
             FROM sessions s 
             JOIN test_values tv ON s.id = tv.session_id 
-            WHERE tv.test_name = ?
-          `).all(yVariable);
+            WHERE tv.test_slug = ? OR tv.test_name = ?
+          `).all(yVariable, yVariable);
           targetLists = sessRows.map(r => r.test_list_name).filter(Boolean);
         }
       }
@@ -573,9 +583,9 @@ router.post('/query', async (req, res) => {
         SELECT COUNT(*) as count 
         FROM test_values tv
         JOIN sessions s ON tv.session_id = s.id
-        WHERE tv.test_name = ?
+        WHERE (tv.test_slug = ? OR tv.test_name = ?)
       `;
-      const countParams = [yVariable];
+      const countParams = [yVariable, yVariable];
       if (!includeAllInstances && targetLists.length > 0) {
         const placeholders = targetLists.map(() => '?').join(',');
         countQuery += ` AND s.test_list_name IN (${placeholders})`;
@@ -638,18 +648,64 @@ router.post('/query', async (req, res) => {
     }
 
     if (dateFrom) {
-      sessionWhereClauses.push(`s.work_completed >= ?`);
+      sessionWhereClauses.push(`COALESCE(s.work_started, s.work_completed) >= ?`);
       sessionParams.push(dateFrom);
     }
     if (dateTo) {
-      sessionWhereClauses.push(`s.work_completed <= ?`);
+      sessionWhereClauses.push(`COALESCE(s.work_started, s.work_completed) <= ?`);
       sessionParams.push(dateTo);
     }
 
-    // Handle conditional test filters (e.g. Site == Prostate) with AND / OR combination support
-    const filterConditions = [];
-    filters.forEach((filter) => {
-      if (filter.testName && filter.value !== undefined && filter.value !== '') {
+// Helper to normalize filter conditions into groups with bracket/group boolean logic support
+function normalizeFilterGroups(filters) {
+  if (!filters) return { groupLogic: 'and', groups: [] };
+  if (!Array.isArray(filters) && filters.groups) {
+    return {
+      groupLogic: (filters.groupLogic || 'and').toLowerCase(),
+      groups: filters.groups.map(g => ({
+        id: g.id || `grp-${Math.random().toString(36).substr(2, 9)}`,
+        logic: (g.logic || 'and').toLowerCase(),
+        conditions: (g.conditions || []).filter(c => c && c.testName && c.value !== undefined && c.value !== '')
+      })).filter(g => g.conditions.length > 0)
+    };
+  }
+  if (Array.isArray(filters) && filters.length > 0 && filters[0].conditions) {
+    return {
+      groupLogic: 'and',
+      groups: filters.map(g => ({
+        id: g.id || `grp-${Math.random().toString(36).substr(2, 9)}`,
+        logic: (g.logic || 'and').toLowerCase(),
+        conditions: (g.conditions || []).filter(c => c && c.testName && c.value !== undefined && c.value !== '')
+      })).filter(g => g.conditions.length > 0)
+    };
+  }
+  if (Array.isArray(filters)) {
+    const validConditions = filters.filter(c => c && c.testName && c.value !== undefined && c.value !== '');
+    if (validConditions.length === 0) return { groupLogic: 'and', groups: [] };
+    const hasOr = validConditions.some(c => (c.logic || '').toLowerCase() === 'or');
+    return {
+      groupLogic: 'and',
+      groups: [
+        {
+          id: 'grp-legacy',
+          logic: hasOr ? 'or' : 'and',
+          conditions: validConditions
+        }
+      ]
+    };
+  }
+  return { groupLogic: 'and', groups: [] };
+}
+
+    // Handle conditional test filters with grouping & bracket support
+    const normalizedFilters = normalizeFilterGroups(filters);
+    const groupSqlBlocks = [];
+
+    for (const group of normalizedFilters.groups) {
+      const groupClauses = [];
+      const groupOp = group.logic.toUpperCase() === 'OR' ? 'OR' : 'AND';
+
+      for (const filter of group.conditions) {
         const paramVal = filter.value;
         let clause = '';
         let params = [];
@@ -657,53 +713,48 @@ router.post('/query', async (req, res) => {
         if (filter.operator === 'not_equals') {
           clause = `s.id NOT IN (
             SELECT session_id FROM test_values
-            WHERE test_name = ? AND value_string = ?
+            WHERE (test_slug = ? OR test_name = ?) AND value_string = ?
           )`;
-          params = [filter.testName, paramVal];
+          params = [filter.testName, filter.testName, paramVal];
         } else if (filter.operator === 'contains') {
           clause = `s.id IN (
             SELECT session_id FROM test_values
-            WHERE test_name = ? AND value_string LIKE ?
+            WHERE (test_slug = ? OR test_name = ?) AND value_string LIKE ?
           )`;
-          params = [filter.testName, `%${paramVal}%`];
+          params = [filter.testName, filter.testName, `%${paramVal}%`];
         } else if (filter.operator === 'gt') {
           clause = `s.id IN (
             SELECT session_id FROM test_values
-            WHERE test_name = ? AND value_numeric > ?
+            WHERE (test_slug = ? OR test_name = ?) AND value_numeric > ?
           )`;
-          params = [filter.testName, parseFloat(paramVal)];
+          params = [filter.testName, filter.testName, parseFloat(paramVal)];
         } else if (filter.operator === 'lt') {
           clause = `s.id IN (
             SELECT session_id FROM test_values
-            WHERE test_name = ? AND value_numeric < ?
+            WHERE (test_slug = ? OR test_name = ?) AND value_numeric < ?
           )`;
-          params = [filter.testName, parseFloat(paramVal)];
+          params = [filter.testName, filter.testName, parseFloat(paramVal)];
         } else {
-          // Default equals
+          // Default equals (supports string and numeric)
           clause = `s.id IN (
             SELECT session_id FROM test_values
-            WHERE test_name = ? AND (value_string = ? OR value_numeric = ?)
+            WHERE (test_slug = ? OR test_name = ?) AND (value_string = ? OR value_numeric = ?)
           )`;
-          params = [filter.testName, paramVal, parseFloat(paramVal) || null];
+          params = [filter.testName, filter.testName, paramVal, parseFloat(paramVal) || null];
         }
 
-        const logic = filter.logic || req.body.filterLogic || 'and';
-        filterConditions.push({ clause, params, logic });
+        groupClauses.push(clause);
+        sessionParams.push(...params);
       }
-    });
 
-    if (filterConditions.length > 0) {
-      let filterSql = '';
-      filterConditions.forEach((fc, idx) => {
-        if (idx === 0) {
-          filterSql += `(${fc.clause})`;
-        } else {
-          const op = (fc.logic && fc.logic.toUpperCase() === 'OR') ? 'OR' : 'AND';
-          filterSql += ` ${op} (${fc.clause})`;
-        }
-        sessionParams.push(...fc.params);
-      });
-      sessionWhereClauses.push(`(${filterSql})`);
+      if (groupClauses.length > 0) {
+        groupSqlBlocks.push(`(${groupClauses.join(` ${groupOp} `)})`);
+      }
+    }
+
+    if (groupSqlBlocks.length > 0) {
+      const topOp = normalizedFilters.groupLogic.toUpperCase() === 'OR' ? 'OR' : 'AND';
+      sessionWhereClauses.push(`(${groupSqlBlocks.join(` ${topOp} `)})`);
     }
 
     const whereSql = sessionWhereClauses.length > 0
@@ -712,10 +763,10 @@ router.post('/query', async (req, res) => {
 
     // Fetch matching sessions
     const sessionQuery = `
-      SELECT s.id, s.qatrack_instance_id, s.unit_name, s.test_list_name, s.work_completed, s.status, s.created_by, s.comments
+      SELECT s.id, s.qatrack_instance_id, s.unit_name, s.test_list_name, s.work_started, s.work_completed, s.status, s.created_by, s.comments
       FROM sessions s
       ${whereSql}
-      ORDER BY s.work_completed ASC
+      ORDER BY COALESCE(s.work_started, s.work_completed) ASC
     `;
     const sessions = db.prepare(sessionQuery).all(...sessionParams);
 
@@ -780,9 +831,10 @@ router.post('/query', async (req, res) => {
       // Calculate X value
       let xNum = null;
       let xLabel = '';
-      if (!xVariable || xVariable === 'work_completed') {
-        xNum = new Date(sess.work_completed).getTime();
-        xLabel = sess.work_completed;
+      const sessionDate = sess.work_started || sess.work_completed;
+      if (!xVariable || xVariable === 'work_completed' || xVariable === 'work_started' || xVariable === 'date') {
+        xNum = new Date(sessionDate).getTime();
+        xLabel = sessionDate;
       } else {
         const xValObj = sessVals[xVariable];
         xNum = xValObj ? xValObj.value_numeric : null;
@@ -803,7 +855,9 @@ router.post('/query', async (req, res) => {
         qatrackInstanceId: sess.qatrack_instance_id || null,
         testList: sess.test_list_name,
         unit: sess.unit_name,
-        date: sess.work_completed,
+        date: sessionDate,
+        workStarted: sess.work_started || sess.work_completed,
+        workCompleted: sess.work_completed,
         status: sess.status,
         operator: sess.created_by
       };
@@ -847,7 +901,9 @@ router.post('/query', async (req, res) => {
         xLabel,
         y: yNum,
         unit: sess.unit_name,
-        date: sess.work_completed,
+        date: sessionDate,
+        workStarted: sess.work_started || sess.work_completed,
+        workCompleted: sess.work_completed,
         group: groupName,
         metadata: meta,
         yToleranceMin: yValObj ? yValObj.tolerance_min : null,
@@ -856,7 +912,7 @@ router.post('/query', async (req, res) => {
 
       dataPoints.push(point);
       yValues.push(yNum);
-      if (typeof xNum === 'number' && !isNaN(xNum) && xVariable !== 'work_completed') {
+      if (typeof xNum === 'number' && !isNaN(xNum) && xVariable !== 'work_completed' && xVariable !== 'work_started' && xVariable !== 'date') {
         xValues.push(xNum);
       }
 
@@ -868,12 +924,16 @@ router.post('/query', async (req, res) => {
       // Table row representation
       const row = {
         sessionId: sess.id,
-        date: sess.work_completed,
+        date: sessionDate,
+        work_started: sess.work_started || sess.work_completed,
+        work_completed: sess.work_completed,
         unit: sess.unit_name,
         status: sess.status,
         ...meta,
         [yVariable]: yNum,
-        ...(xVariable && xVariable !== 'work_completed' ? { [xVariable]: xNum } : {})
+        ...(yValObj?.test_name ? { [yValObj.test_name]: yNum } : {}),
+        ...(yValObj?.test_slug ? { [yValObj.test_slug]: yNum } : {}),
+        ...(xVariable && xVariable !== 'work_completed' && xVariable !== 'work_started' && xVariable !== 'date' ? { [xVariable]: xNum } : {})
       };
       tableRows.push(row);
     }
@@ -1035,36 +1095,39 @@ router.get(['/session-details/:id', '/sessions/:id/details'], async (req, res) =
       ORDER BY tv.test_name ASC
     `).all(session.id);
 
-    // Guarantee strictly 1 row per unique test name
+    // Guarantee strictly 1 row per unique test name and slug
     const seenTests = new Set();
     const uniqueTestValues = [];
     for (const tv of testValuesRaw) {
-      const key = (tv.test_name || '').toLowerCase().trim();
+      const key = `${tv.test_name || ''}::${tv.test_slug || ''}`.toLowerCase().trim();
       if (!seenTests.has(key)) {
         seenTests.add(key);
         uniqueTestValues.push(tv);
       }
     }
 
+    const sessDate = session.work_started || session.work_completed;
+    session.date = sessDate;
+
     const getPrevStmt = db.prepare(`
-      SELECT tv.value_string, tv.value_numeric, tv.unit, tv.status, tv.pass_fail, tv.tolerance_min, tv.tolerance_max, s.work_completed, s.id as session_id, td.formatting
+      SELECT tv.value_string, tv.value_numeric, tv.unit, tv.status, tv.pass_fail, tv.tolerance_min, tv.tolerance_max, COALESCE(s.work_started, s.work_completed) as work_date, s.work_started, s.work_completed, s.id as session_id, td.formatting
       FROM test_values tv
       JOIN sessions s ON tv.session_id = s.id
       LEFT JOIN (SELECT name, MAX(formatting) as formatting FROM test_definitions GROUP BY name) td ON tv.test_name = td.name
-      WHERE s.unit_name = ? AND tv.test_name = ?
-        AND (s.work_completed < ? OR (s.work_completed = ? AND s.id < ?))
-      ORDER BY s.work_completed DESC, s.id DESC
+      WHERE s.unit_name = ? AND (tv.test_slug = ? OR tv.test_name = ?)
+        AND (COALESCE(s.work_started, s.work_completed) < ? OR (COALESCE(s.work_started, s.work_completed) = ? AND s.id < ?))
+      ORDER BY COALESCE(s.work_started, s.work_completed) DESC, s.id DESC
       LIMIT 1
     `);
 
     const getNextStmt = db.prepare(`
-      SELECT tv.value_string, tv.value_numeric, tv.unit, tv.status, tv.pass_fail, tv.tolerance_min, tv.tolerance_max, s.work_completed, s.id as session_id, td.formatting
+      SELECT tv.value_string, tv.value_numeric, tv.unit, tv.status, tv.pass_fail, tv.tolerance_min, tv.tolerance_max, COALESCE(s.work_started, s.work_completed) as work_date, s.work_started, s.work_completed, s.id as session_id, td.formatting
       FROM test_values tv
       JOIN sessions s ON tv.session_id = s.id
       LEFT JOIN (SELECT name, MAX(formatting) as formatting FROM test_definitions GROUP BY name) td ON tv.test_name = td.name
-      WHERE s.unit_name = ? AND tv.test_name = ?
-        AND (s.work_completed > ? OR (s.work_completed = ? AND s.id > ?))
-      ORDER BY s.work_completed ASC, s.id ASC
+      WHERE s.unit_name = ? AND (tv.test_slug = ? OR tv.test_name = ?)
+        AND (COALESCE(s.work_started, s.work_completed) > ? OR (COALESCE(s.work_started, s.work_completed) = ? AND s.id > ?))
+      ORDER BY COALESCE(s.work_started, s.work_completed) ASC, s.id ASC
       LIMIT 1
     `);
 
@@ -1094,7 +1157,9 @@ router.get(['/session-details/:id', '/sessions/:id/details'], async (req, res) =
       // 4. Fetch previous test reading for this machine
       let previous = null;
       try {
-        const prevRow = getPrevStmt.get(session.unit_name, tv.test_name, session.work_completed, session.work_completed, session.id);
+        const testIdent = tv.test_slug || tv.test_name;
+        const testNameIdent = tv.test_name || tv.test_slug;
+        const prevRow = getPrevStmt.get(session.unit_name, testIdent, testNameIdent, sessDate, sessDate, session.id);
         if (prevRow) {
           let prevDisplay = prevRow.value_string;
           if ((!prevDisplay || prevDisplay === String(prevRow.value_numeric)) && prevRow.formatting && prevRow.value_numeric !== null) {
@@ -1112,7 +1177,7 @@ router.get(['/session-details/:id', '/sessions/:id/details'], async (req, res) =
             toleranceLevel: prevTolLevel,
             diffPercent,
             arrow,
-            date: prevRow.work_completed,
+            date: prevRow.work_date || prevRow.work_started || prevRow.work_completed,
             sessionId: prevRow.session_id
           };
         }
@@ -1121,7 +1186,9 @@ router.get(['/session-details/:id', '/sessions/:id/details'], async (req, res) =
       // 5. Fetch following test reading for this machine
       let following = null;
       try {
-        const nextRow = getNextStmt.get(session.unit_name, tv.test_name, session.work_completed, session.work_completed, session.id);
+        const testIdent = tv.test_slug || tv.test_name;
+        const testNameIdent = tv.test_name || tv.test_slug;
+        const nextRow = getNextStmt.get(session.unit_name, testIdent, testNameIdent, sessDate, sessDate, session.id);
         if (nextRow) {
           let nextDisplay = nextRow.value_string;
           if ((!nextDisplay || nextDisplay === String(nextRow.value_numeric)) && nextRow.formatting && nextRow.value_numeric !== null) {
@@ -1139,7 +1206,7 @@ router.get(['/session-details/:id', '/sessions/:id/details'], async (req, res) =
             toleranceLevel: nextTolLevel,
             diffPercent,
             arrow,
-            date: nextRow.work_completed,
+            date: nextRow.work_date || nextRow.work_started || nextRow.work_completed,
             sessionId: nextRow.session_id
           };
         }
